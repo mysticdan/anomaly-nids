@@ -189,13 +189,29 @@ def get_traffic_stats(minutes=30):
     return rows
 
 
-def get_alerts(limit=100, status=None):
+def get_alerts(limit=100, status=None, minutes=None):
     conn = get_connection()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    
+    query = "SELECT * FROM alerts"
+    params = []
+    conditions = []
+    
     if status:
-        cur.execute("SELECT * FROM alerts WHERE status=%s ORDER BY created_at DESC LIMIT %s", (status, limit))
-    else:
-        cur.execute("SELECT * FROM alerts ORDER BY created_at DESC LIMIT %s", (limit,))
+        conditions.append("status=%s")
+        params.append(status)
+    
+    if minutes is not None:
+        conditions.append("created_at > NOW() - make_interval(mins => %s)")
+        params.append(minutes)
+        
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+        
+    query += " ORDER BY created_at DESC LIMIT %s"
+    params.append(limit)
+    
+    cur.execute(query, tuple(params))
     rows = cur.fetchall()
     cur.close()
     conn.close()
@@ -339,3 +355,20 @@ def bulk_resolve_by_score(max_score):
     cur.close()
     conn.close()
     return count
+
+def get_normal_flows(limit=1000):
+    """Fetch feature vectors of flows marked as normal."""
+    conn = get_connection()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("""
+        SELECT dst_port_feat, fwd_pkt_len_min, flow_pkts_per_s, bwd_pkts_per_s,
+               fwd_iat_min, ece_flag_cnt, ack_flag_cnt, fwd_seg_size_min,
+               fwd_act_data_pkts, idle_std
+        FROM flows WHERE is_anomaly = FALSE
+        ORDER BY created_at DESC LIMIT %s
+    """, (limit,))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    # Return as a list of lists
+    return [list(r.values()) for r in rows]

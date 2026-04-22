@@ -50,6 +50,9 @@
         .bulk-btn.green { border-color: #065f46; color: #6ee7b7; }
         .bulk-btn.green:hover { background: #065f46; }
         .selected-count { font-size: 12px; color: #3b82f6; font-weight: 600; }
+        .time-ctrl { display: flex; align-items: center; gap: 10px; margin-left: auto; background: #0f172a; padding: 6px 12px; border-radius: 6px; border: 1px solid #334155; }
+        .time-ctrl span { font-size: 12px; color: #94a3b8; }
+        .time-ctrl input { width: 50px; background: transparent; border: 1px solid #334155; color: white; border-radius: 4px; padding: 2px 5px; font-size: 12px; text-align: center; }
         input[type="checkbox"] { accent-color: #3b82f6; }
     </style>
 </head>
@@ -92,6 +95,11 @@
         <button class="bulk-btn" onclick="selectAll()">☑ Select All</button>
         <button class="bulk-btn" onclick="deselectAll()">☐ Deselect All</button>
         <span class="selected-count" id="sel-count"></span>
+        <div class="time-ctrl">
+            <span>Time Range:</span>
+            <input type="number" id="time-range" value="30" onchange="refresh()">
+            <span>min</span>
+        </div>
     </div>
 
     <div class="table-section">
@@ -189,9 +197,10 @@
         }
 
         async function refresh() {
+            const minutes = document.getElementById('time-range').value;
             const [summaryRes, alertsRes] = await Promise.all([
                 fetch('/api/alert-summary'),
-                fetch('/api/alerts?limit=100')
+                fetch(`/api/alerts?limit=100&minutes=${minutes}`)
             ]);
             const summary = await summaryRes.json();
             allAlerts = await alertsRes.json();

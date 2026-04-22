@@ -1,9 +1,13 @@
 import sys
 import os
+import time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from flask import Flask, render_template, jsonify, request, make_response
 import database as db
+from state import state
+
+app = Flask(__name__)
 
 app = Flask(__name__)
 
@@ -115,7 +119,8 @@ def api_top_ports():
 def api_alerts():
     limit = request.args.get("limit", 100, type=int)
     status = request.args.get("status", None)
-    alerts = db.get_alerts(limit, status)
+    minutes = request.args.get("minutes", None, type=int)
+    alerts = db.get_alerts(limit, status, minutes)
     data = []
     for a in alerts:
         data.append({
@@ -152,11 +157,56 @@ def api_resolve_alert(alert_id):
     return jsonify({"ok": True})
 
 
+@app.route("/api/learning_mode", methods=["POST"])
+def api_learning_mode():
+    data = request.get_json()
+    duration_mins = data.get("duration", 10)
+    state.learning_mode = True
+    state.learning_mode_until = time.time() + (duration_mins * 60)
+    return jsonify({"ok": True, "until": state.learning_mode_until})
+
 @app.route("/api/alerts/<int:alert_id>/detail")
 def api_alert_detail(alert_id):
     a = db.get_alert_detail(alert_id)
     if not a:
         return jsonify({"error": "not found"}), 404
+    
+    # Feature contribution analysis
+    contributions = []
+    if state.lstm_service:
+        try:
+            # Fetch the flow and the 49 preceding flows to reconstruct the sequence
+            conn = db.get_connection()
+            cur = conn.cursor(cursor_factory=db.psycopg2.extras.RealDictCursor)
+            cur.execute("""
+                SELECT dst_port_feat, fwd_pkt_len_min, flow_pkts_per_s, bwd_pkts_per_s,
+                       fwd_iat_min, ece_flag_cnt, ack_flag_cnt, fwd_seg_size_min,
+                       fwd_act_data_pkts, idle_std
+                FROM flows 
+                WHERE id <= %s 
+                ORDER BY created_at DESC LIMIT 50
+            """, (a["flow_id"],))
+            rows = cur.fetchall()
+            cur.close()
+            conn.close()
+            
+            if len(rows) == 50:
+                # reverse to get chronological order
+                sequence = [list(r.values()) for r in reversed(rows)]
+                import numpy as np
+                seq_array = np.array(sequence, dtype=np.float32)
+                # We must scale it using the service's scaler
+                scaled_seq = state.lstm_service.scale_features(seq_array)
+                
+                _, _, feature_errors = state.lstm_service.predict(scaled_seq)
+                feature_names = state.lstm_service.get_feature_names()
+                
+                # Zip names and errors, sort by error descending
+                sorted_contribs = sorted(zip(feature_names, feature_errors), key=lambda x: x[1], reverse=True)
+                contributions = [{"feature": name, "error": float(err)} for name, err in sorted_contribs]
+        except Exception as e:
+            print(f"Error computing contributions: {e}")
+
     return jsonify({
         "id": a["id"],
         "flow_id": a["flow_id"],
@@ -171,6 +221,7 @@ def api_alert_detail(alert_id):
         "duration": float(a["duration"] or 0),
         "anomaly_score": float(a["anomaly_score"] or 0),
         "status": a["status"],
+        "contributions": contributions
     })
 
 

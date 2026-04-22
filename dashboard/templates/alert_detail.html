@@ -28,6 +28,10 @@
         .info-item .label { font-size: 11px; color: #94a3b8; margin-bottom: 2px; }
         .info-item .val { font-size: 15px; font-weight: 600; }
         .proto-badge { display: inline-block; padding: 4px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; background: #1e40af; color: #93c5fd; }
+        .contrib-item { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #334155; font-size: 13px; }
+        .contrib-item:last-child { border-bottom: none; }
+        .contrib-label { color: #e2e8f0; font-weight: 500; }
+        .contrib-val { color: #94a3b8; font-family: monospace; }
         .verify-section { margin: 0 30px 30px; background: #1e293b; border-radius: 12px; padding: 24px; border: 1px solid #334155; }
         .verify-section h3 { font-size: 15px; margin-bottom: 4px; }
         .verify-section .sub { font-size: 12px; color: #94a3b8; margin-bottom: 20px; }
@@ -81,6 +85,13 @@
                 <div class="info-item"><div class="label">Status</div><div class="val" id="status">-</div></div>
             </div>
         </div>
+        <div class="card" style="grid-column: span 2;">
+            <h3>Anomaly Analysis: Feature Contributions</h3>
+            <div class="card-sub">Features that contributed most to the reconstruction error (MSE)</div>
+            <div id="contrib-list" style="display:grid; grid-template-columns: repeat(2, 1fr); gap:20px 40px;">
+                <div style="color:#94a3b8; font-size:13px; font-style:italic;">Analyzing features...</div>
+            </div>
+        </div>
     </div>
 
     <div class="verify-section" id="verify-section">
@@ -126,6 +137,18 @@
             document.getElementById('total-pkts').textContent = a.total_packets.toLocaleString();
             document.getElementById('det-time').textContent = '🕐 ' + formatTime(a.timestamp);
             document.getElementById('status').textContent = a.status;
+            
+            if (a.contributions && a.contributions.length > 0) {
+                const list = document.getElementById('contrib-list');
+                list.innerHTML = a.contributions.map(c => `
+                    <div class="contrib-item">
+                        <span class="contrib-label">${c.feature}</span>
+                        <span class="contrib-val">${c.error.toFixed(6)}</span>
+                    </div>
+                `).join('');
+            } else {
+                document.getElementById('contrib-list').innerHTML = '<div style="color:#94a3b8; font-size:13px;">No contribution data available.</div>';
+            }
 
             if (a.status !== 'Active') {
                 const sec = document.getElementById('verify-section');

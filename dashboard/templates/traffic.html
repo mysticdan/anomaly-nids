@@ -67,6 +67,12 @@
             <a href="/" class="active">Traffic</a>
             <a href="/alerts">Alerts</a>
         </div>
+        <div class="learning-ctrl" style="display:flex; align-items:center; gap:10px; background:#334155; padding:8px 15px; border-radius:8px; margin-left:15px;">
+            <span style="font-size:12px; font-weight:600; color:#e2e8f0;">Learning Mode:</span>
+            <input type="number" id="learn-duration" value="10" style="width:45px; background:#0f172a; border:1px solid #475569; color:white; border-radius:4px; padding:2px 5px; font-size:12px;">
+            <span style="font-size:12px; color:#94a3b8;">min</span>
+            <button id="learn-btn" style="background:#3b82f6; color:white; border:none; padding:4px 10px; border-radius:4px; font-size:12px; cursor:pointer; font-weight:600;">Enable</button>
+        </div>
     </div>
 
     <div class="time-bar">
@@ -288,6 +294,31 @@
                 selectedMinutes = parseInt(btn.dataset.minutes);
                 refresh();
             });
+        });
+
+        document.getElementById('learn-btn').addEventListener('click', async () => {
+            const duration = document.getElementById('learn-duration').value;
+            const btn = document.getElementById('learn-btn');
+            btn.disabled = true;
+            btn.textContent = '...';
+            try {
+                await fetch('/api/learning_mode', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ duration: parseInt(duration) })
+                });
+                btn.textContent = 'Enabled!';
+                btn.style.background = '#22c55e';
+                setTimeout(() => {
+                    btn.disabled = false;
+                    btn.textContent = 'Enable';
+                    btn.style.background = '#3b82f6';
+                }, 3000);
+            } catch (e) {
+                alert('Error enabling learning mode');
+                btn.disabled = false;
+                btn.textContent = 'Enable';
+            }
         });
     </script>
 </body>

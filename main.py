@@ -5,8 +5,10 @@ import logging
 import subprocess
 import threading
 import signal
+from typing import Dict
 
 sys.path.insert(0, os.path.dirname(__file__))
+from state import state
 
 TRAFFIC_SRC_DIR = os.path.join(os.path.dirname(__file__), "traffic-source")
 sys.path.insert(0, TRAFFIC_SRC_DIR)
@@ -20,6 +22,7 @@ sys.path.insert(0, LSTM_AE_DIR)
 from model import LSTMAEService
 
 import database as db
+from update_model.update_model import update_model_worker
 
 CONFIG = {
     "model": {
@@ -42,16 +45,13 @@ CONFIG = {
 
 running = True
 
-
 def signal_handler(sig, frame):
     global running
     running = False
     logger.info("Shutting down...")
 
-
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
-
 
 def start_argus_capture(interface="eth0"):
     fields = "stime,ltime,saddr,daddr,sport,dport,proto,dur,sbytes,dbytes,spkts,dpkts,flgs,state,sttl,dttl,smeansz,dmeansz,sminsz,dminsz,smaxsz,dmaxsz,sintpkt,dintpkt,sjit,djit,sload,dload,sloss,dloss"
@@ -60,6 +60,29 @@ def start_argus_capture(interface="eth0"):
     logger.info(f"Argus capture started on {interface}")
     return proc
 
+# def update_model_worker(lstm_service):
+#     """Background worker for incremental learning."""
+#     while running:
+#         try:
+#             # Train every 10 minutes if there's enough data
+#             time.sleep(600)
+#             logger.info("Triggering incremental learning...")
+#             normal_flows = db.get_normal_flows(limit=1000)
+#             if len(normal_flows) >= 100:
+#                 # Convert flows to sequences
+#                 sequences = []
+#                 for i in range(len(normal_flows) - lstm_service.seq_len + 1):
+#                     sequences.append(normal_flows[i : i + lstm_service.seq_len])
+                
+#                 if sequences:
+#                     data = np.array(sequences, dtype=np.float32)
+#                     # Scale the data
+#                     scaled_data = lstm_service.scale_features(data)
+#                     lstm_service.train_incremental(scaled_data)
+#             else:
+#                 logger.info("Not enough normal flows for training.")
+#         except Exception as e:
+#             logger.error(f"Update-Model worker error: {e}")
 
 def run_pipeline():
     global running
@@ -69,6 +92,11 @@ def run_pipeline():
 
     lstm_service = LSTMAEService(CONFIG)
     logger.info("LSTM-AE service ready")
+    state.lstm_service = lstm_service
+
+    # Start background update-model worker
+    worker_thread = threading.Thread(target=update_model_worker, daemon=True)
+    worker_thread.start()
 
     interface = os.getenv("CAPTURE_INTERFACE", "eth0")
     proc = start_argus_capture(interface)
@@ -105,8 +133,16 @@ def run_pipeline():
             is_anomaly = False
 
             if sequence is not None:
-                mse, anomaly_score = lstm_service.predict(sequence)
+                mse, anomaly_score, _ = lstm_service.predict(sequence)
                 is_anomaly = lstm_service.is_anomaly(mse)
+
+            # Learning Mode Logic
+            if state.learning_mode:
+                if time.time() < state.learning_mode_until:
+                    is_anomaly = False # All traffic is normal during learning mode
+                else:
+                    state.learning_mode = False
+                    logger.info("Learning mode ended.")
 
             db.insert_flow(metadata, features, anomaly_score, is_anomaly)
             flow_count += 1
@@ -123,13 +159,12 @@ def run_pipeline():
         proc.terminate()
         logger.info(f"Stopped. Total: {flow_count} flows")
 
-
 def start_dashboard():
     from dashboard.app import app
     app.run(host="0.0.0.0", port=5000, debug=False)
 
-
 if __name__ == "__main__":
+    import numpy as np
     dashboard_thread = threading.Thread(target=start_dashboard, daemon=True)
     dashboard_thread.start()
     logger.info("Dashboard started on http://localhost:5000")

@@ -241,23 +241,69 @@ class LSTMAEService:
             return scaled.astype(np.float32)
         return None
 
+    def get_feature_names(self) -> List[str]:
+        """Return the names of the 10 features."""
+        return [
+            "Dst Port", "Fwd Pkt Len Min", "Flow Pkts/s", "Bwd Pkts/s",
+            "Fwd IAT Min", "ECE Flag Cnt", "ACK Flag Cnt", "Fwd Seg Size Min",
+            "Fwd Act Data Pkts", "Idle Std"
+        ]
+
     @torch.no_grad()
-    def predict(self, sequence: np.ndarray) -> Tuple[float, float]:
+    def predict(self, sequence: np.ndarray) -> Tuple[float, float, np.ndarray]:
         """
         Run anomaly detection on a sequence.
-        Returns: (reconstruction_error, anomaly_score)
+        Returns: (reconstruction_error, anomaly_score, per_feature_errors)
         """
         self.model.eval()
         x = torch.FloatTensor(sequence).unsqueeze(0).to(self.device)
         reconstruction, latent = self.model(x)
-        mse = ((x - reconstruction) ** 2).mean().item()
+        
+        # Calculate squared error per element: (batch, seq_len, input_dim)
+        sq_errors = (x - reconstruction) ** 2
+        # Mean over sequence length to get error per feature: (batch, input_dim)
+        feature_errors = sq_errors.mean(dim=1).squeeze(0).cpu().numpy()
+        # Total MSE: mean of all elements
+        mse = sq_errors.mean().item()
 
         if self.threshold > 0:
             score = min(100.0, (mse / self.threshold) * self.score_multiplier)
         else:
             score = min(100.0, mse * self.score_multiplier)
 
-        return mse, score
+        return mse, score, feature_errors
+
+    def train_incremental(self, data: np.ndarray, epochs: int = 1, lr: float = 1e-4):
+        """
+        Incremental learning on normal traffic data.
+        
+        Args:
+            data: (num_samples, seq_len, input_dim) normal sequences
+            epochs: Number of training epochs
+            lr: Learning rate
+        """
+        if len(data) == 0:
+            return 0.0
+
+        self.model.train()
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
+        criterion = nn.MSELoss()
+        
+        x_train = torch.FloatTensor(data).to(self.device)
+        
+        total_loss = 0.0
+        for epoch in range(epochs):
+            optimizer.zero_grad()
+            reconstruction, _ = self.model(x_train)
+            loss = criterion(reconstruction, x_train)
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+        
+        self.model.eval()
+        self.save_model()
+        logger.info(f"Incremental training complete. Avg loss: {total_loss/epochs:.6f}")
+        return total_loss / epochs
 
     def is_anomaly(self, mse: float) -> bool:
         """Check if reconstruction error exceeds threshold."""
