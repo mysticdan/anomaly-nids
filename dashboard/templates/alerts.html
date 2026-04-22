@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Alert Dashboard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; }
+        .header { background: #1e293b; padding: 20px 30px; border-bottom: 1px solid #334155; display: flex; justify-content: space-between; align-items: center; }
+        .header h1 { font-size: 20px; font-weight: 600; }
+        .header .subtitle { color: #94a3b8; font-size: 13px; }
+        .nav { display: flex; gap: 10px; }
+        .nav a { padding: 8px 16px; border-radius: 6px; text-decoration: none; color: #94a3b8; font-size: 13px; }
+        .nav a.active { background: #ef4444; color: white; }
+        .nav a:hover { color: white; }
+        .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; padding: 20px 30px; }
+        .stat-card { background: #1e293b; border-radius: 10px; padding: 20px; border: 1px solid #334155; }
+        .stat-card .icon { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+        .stat-card .icon.yellow { background: #eab308; }
+        .stat-card .icon.blue { background: #3b82f6; }
+        .stat-card .icon.green { background: #22c55e; }
+        .stat-card .icon.gray { background: #94a3b8; }
+        .stat-card .label { font-size: 12px; color: #94a3b8; margin-bottom: 6px; }
+        .stat-card .value { font-size: 28px; font-weight: 700; }
+        .table-section { margin: 20px 30px; background: #1e293b; border-radius: 10px; padding: 20px; border: 1px solid #334155; }
+        .table-section h2 { font-size: 16px; margin-bottom: 16px; }
+        table { width: 100%; border-collapse: collapse; }
+        th { text-align: left; padding: 10px 12px; font-size: 12px; color: #94a3b8; border-bottom: 1px solid #334155; cursor: pointer; }
+        th:hover { color: #e2e8f0; }
+        td { padding: 10px 12px; font-size: 13px; border-bottom: 1px solid #1e293b33; }
+        tr:hover { background: #334155; }
+        .proto-badge { padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+        .proto-TCP { background: #1e40af; color: #93c5fd; }
+        .proto-SSH { background: #5b21b6; color: #c4b5fd; }
+        .proto-UDP { background: #065f46; color: #6ee7b7; }
+        .proto-HTTP { background: #374151; color: #d1d5db; }
+        .proto-RDP { background: #92400e; color: #fcd34d; }
+        .score-high { color: #ef4444; font-weight: 600; }
+        .score-mid { color: #eab308; font-weight: 600; }
+        .score-low { color: #22c55e; }
+        .btn-view { padding: 4px 12px; border-radius: 6px; border: 1px solid #334155; background: transparent; color: #94a3b8; cursor: pointer; font-size: 12px; }
+        .btn-view:hover { background: #334155; color: white; }
+        .bulk-bar { display: flex; gap: 10px; align-items: center; margin: 0 30px 0; padding: 14px 20px; background: #1e293b; border-radius: 10px; border: 1px solid #334155; flex-wrap: wrap; }
+        .bulk-bar .label { font-size: 13px; color: #94a3b8; margin-right: 6px; }
+        .bulk-btn { padding: 6px 14px; border-radius: 6px; border: 1px solid #334155; background: transparent; color: #e2e8f0; cursor: pointer; font-size: 12px; }
+        .bulk-btn:hover { background: #334155; }
+        .bulk-btn.red { border-color: #991b1b; color: #fca5a5; }
+        .bulk-btn.red:hover { background: #991b1b; }
+        .bulk-btn.green { border-color: #065f46; color: #6ee7b7; }
+        .bulk-btn.green:hover { background: #065f46; }
+        .selected-count { font-size: 12px; color: #3b82f6; font-weight: 600; }
+        input[type="checkbox"] { accent-color: #3b82f6; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div>
+            <h1>Alert Dashboard</h1>
+            <div class="subtitle">Real-time monitoring and threat detection</div>
+        </div>
+        <div class="nav">
+            <a href="/">Traffic</a>
+            <a href="/alerts" class="active">Alerts</a>
+        </div>
+    </div>
+
+    <div class="stats">
+        <div class="stat-card">
+            <div class="label"><span class="icon yellow"></span> Total Alerts</div>
+            <div class="value" id="total-alerts">0</div>
+        </div>
+        <div class="stat-card">
+            <div class="label"><span class="icon blue"></span> Active</div>
+            <div class="value" id="active-alerts">0</div>
+        </div>
+        <div class="stat-card">
+            <div class="label"><span class="icon green"></span> Resolved</div>
+            <div class="value" id="resolved-alerts">0</div>
+        </div>
+        <div class="stat-card">
+            <div class="label"><span class="icon gray"></span> Avg Score</div>
+            <div class="value" id="avg-score">0</div>
+        </div>
+    </div>
+
+    <div class="bulk-bar">
+        <span class="label">Bulk Actions:</span>
+        <button class="bulk-btn green" onclick="bulkAction('Resolved')">✓ Resolve Selected</button>
+        <button class="bulk-btn" onclick="bulkAction('False Positive')">✕ Mark Selected False Positive</button>
+        <button class="bulk-btn red" onclick="autoDismiss(40)">🗑 Auto-dismiss Score &lt; 40</button>
+        <button class="bulk-btn" onclick="selectAll()">☑ Select All</button>
+        <button class="bulk-btn" onclick="deselectAll()">☐ Deselect All</button>
+        <span class="selected-count" id="sel-count"></span>
+    </div>
+
+    <div class="table-section">
+        <h2>Active Security Alerts</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th style="width:30px"><input type="checkbox" id="chk-all" onchange="toggleAll(this)"></th>
+                    <th>Time ↕</th>
+                    <th>Source IP ↕</th>
+                    <th>Dest IP ↕</th>
+                    <th>Source Port ↕</th>
+                    <th>Dest Port ↕</th>
+                    <th>Protocol ↕</th>
+                    <th>Bytes ↕</th>
+                    <th>Packets ↕</th>
+                    <th>Duration ↕</th>
+                    <th>Score ↕</th>
+                    <th>Action</th>
+                </tr>
+            </thead>
+            <tbody id="alerts-table"></tbody>
+        </table>
+    </div>
+
+    <script>
+        let allAlerts = [];
+
+        function formatBytes(b) {
+            if (b > 1e9) return (b/1e9).toFixed(2) + ' GB';
+            if (b > 1e6) return (b/1e6).toFixed(2) + ' MB';
+            if (b > 1e3) return (b/1e3).toFixed(2) + ' KB';
+            return b.toFixed(2) + ' B';
+        }
+
+        function formatTime(ts) {
+            if (!ts) return '-';
+            return new Date(ts * 1000).toLocaleTimeString();
+        }
+
+        function protoBadge(p) {
+            return `<span class="proto-badge proto-${p}">${p}</span>`;
+        }
+
+        function getSelected() {
+            return [...document.querySelectorAll('.alert-chk:checked')].map(c => parseInt(c.value));
+        }
+
+        function updateCount() {
+            const n = getSelected().length;
+            document.getElementById('sel-count').textContent = n > 0 ? `${n} selected` : '';
+        }
+
+        function toggleAll(el) {
+            document.querySelectorAll('.alert-chk').forEach(c => c.checked = el.checked);
+            updateCount();
+        }
+
+        function selectAll() {
+            document.querySelectorAll('.alert-chk').forEach(c => c.checked = true);
+            document.getElementById('chk-all').checked = true;
+            updateCount();
+        }
+
+        function deselectAll() {
+            document.querySelectorAll('.alert-chk').forEach(c => c.checked = false);
+            document.getElementById('chk-all').checked = false;
+            updateCount();
+        }
+
+        async function bulkAction(action) {
+            const ids = getSelected();
+            if (ids.length === 0) return alert('Select alerts first');
+            await fetch('/api/alerts/bulk', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ ids, action })
+            });
+            refresh();
+        }
+
+        async function autoDismiss(maxScore) {
+            const res = await fetch('/api/alerts/auto-dismiss', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ max_score: maxScore })
+            });
+            const data = await res.json();
+            if (data.dismissed > 0) {
+                alert(`${data.dismissed} alerts dismissed`);
+            } else {
+                alert('No alerts to dismiss');
+            }
+            refresh();
+        }
+
+        async function refresh() {
+            const [summaryRes, alertsRes] = await Promise.all([
+                fetch('/api/alert-summary'),
+                fetch('/api/alerts?limit=100')
+            ]);
+            const summary = await summaryRes.json();
+            allAlerts = await alertsRes.json();
+
+            document.getElementById('total-alerts').textContent = summary.total;
+            document.getElementById('active-alerts').textContent = summary.active;
+            document.getElementById('resolved-alerts').textContent = summary.resolved;
+            document.getElementById('avg-score').textContent = summary.avg_score;
+
+            const tbody = document.getElementById('alerts-table');
+            tbody.innerHTML = allAlerts.map(a => `
+                <tr>
+                    <td><input type="checkbox" class="alert-chk" value="${a.id}" onchange="updateCount()" ${a.status !== 'Active' ? 'disabled' : ''}></td>
+                    <td>${formatTime(a.timestamp)}</td>
+                    <td>${a.src_ip}</td>
+                    <td>${a.dst_ip}</td>
+                    <td>${a.src_port}</td>
+                    <td>${a.dst_port}</td>
+                    <td>${protoBadge(a.protocol)}</td>
+                    <td>${formatBytes(a.total_bytes)}</td>
+                    <td>${a.total_packets}</td>
+                    <td>${a.duration.toFixed(1)}s</td>
+                    <td><span class="${a.anomaly_score >= 70 ? 'score-high' : a.anomaly_score >= 40 ? 'score-mid' : 'score-low'}">${Math.round(a.anomaly_score)}</span></td>
+                    <td><a href="/alerts/${a.id}" class="btn-view">📝 Detail</a></td>
+                </tr>
+            `).join('');
+
+            document.getElementById('chk-all').checked = false;
+            updateCount();
+        }
+
+        refresh();
+        setInterval(refresh, 5000);
+    </script>
+</body>
+</html>

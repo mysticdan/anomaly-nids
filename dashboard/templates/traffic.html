@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Traffic Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; }
+        .header { background: #1e293b; padding: 20px 30px; border-bottom: 1px solid #334155; display: flex; justify-content: space-between; align-items: center; }
+        .header h1 { font-size: 20px; font-weight: 600; }
+        .header .subtitle { color: #94a3b8; font-size: 13px; }
+        .nav { display: flex; gap: 10px; }
+        .nav a { padding: 8px 16px; border-radius: 6px; text-decoration: none; color: #94a3b8; font-size: 13px; }
+        .nav a.active { background: #3b82f6; color: white; }
+        .nav a:hover { color: white; }
+        .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; padding: 20px 30px; }
+        .stat-card { background: #1e293b; border-radius: 10px; padding: 20px; border: 1px solid #334155; }
+        .stat-card .label { font-size: 12px; color: #94a3b8; margin-bottom: 6px; }
+        .stat-card .value { font-size: 28px; font-weight: 700; }
+        .stat-card .value.blue { color: #3b82f6; }
+        .stat-card .value.green { color: #22c55e; }
+        .stat-card .value.yellow { color: #eab308; }
+        .chart-container { margin: 0 30px 20px; background: #1e293b; border-radius: 10px; padding: 20px; border: 1px solid #334155; }
+        .chart-container h2 { font-size: 16px; margin-bottom: 16px; }
+        .chart-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 0 30px 20px; }
+        canvas { max-height: 250px; }
+        .panels { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; padding: 0 30px 30px; }
+        .panel { background: #1e293b; border-radius: 10px; padding: 20px; border: 1px solid #334155; }
+        .panel h2 { font-size: 15px; margin-bottom: 14px; }
+        .panel-list { list-style: none; }
+        .panel-list li { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #334155; font-size: 13px; }
+        .panel-list li:last-child { border-bottom: none; }
+        .panel-list .ip { font-weight: 600; }
+        .panel-list .meta { color: #94a3b8; font-size: 11px; }
+        .bar-wrap { display: flex; align-items: center; gap: 8px; flex: 1; margin-left: 12px; }
+        .bar { height: 6px; border-radius: 3px; background: #3b82f6; }
+        .bar.green { background: #22c55e; }
+        .bar.yellow { background: #eab308; }
+        .bar.red { background: #ef4444; }
+        .bar.purple { background: #8b5cf6; }
+        .proto-badge { padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 600; }
+        .proto-TCP { background: #1e40af; color: #93c5fd; }
+        .proto-UDP { background: #065f46; color: #6ee7b7; }
+        .proto-ICMP { background: #92400e; color: #fcd34d; }
+        .donut-wrap { display: flex; align-items: center; gap: 20px; }
+        .donut-wrap canvas { max-width: 140px; max-height: 140px; }
+        .donut-legend { list-style: none; }
+        .donut-legend li { font-size: 12px; padding: 3px 0; display: flex; align-items: center; gap: 6px; }
+        .donut-legend .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+        .time-bar { display: flex; align-items: center; gap: 12px; padding: 12px 30px; }
+        .time-label { font-size: 13px; color: #94a3b8; }
+        .time-btns { display: flex; gap: 6px; }
+        .time-btn { padding: 6px 14px; border-radius: 6px; border: 1px solid #334155; background: #1e293b; color: #94a3b8; font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.15s; }
+        .time-btn:hover { border-color: #3b82f6; color: #e2e8f0; }
+        .time-btn.active { background: #3b82f6; border-color: #3b82f6; color: white; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div>
+            <h1>Traffic Dashboard</h1>
+            <div class="subtitle">Real-time network traffic monitoring</div>
+        </div>
+        <div class="nav">
+            <a href="/" class="active">Traffic</a>
+            <a href="/alerts">Alerts</a>
+        </div>
+    </div>
+
+    <div class="time-bar">
+        <span class="time-label">Time Range:</span>
+        <div class="time-btns">
+            <button class="time-btn active" data-minutes="30">30m</button>
+            <button class="time-btn" data-minutes="60">1h</button>
+            <button class="time-btn" data-minutes="360">6h</button>
+            <button class="time-btn" data-minutes="1440">24h</button>
+            <button class="time-btn" data-minutes="10080">7d</button>
+            <button class="time-btn" data-minutes="0">All</button>
+        </div>
+    </div>
+
+    <div class="stats">
+        <div class="stat-card">
+            <div class="label">Total Flows</div>
+            <div class="value blue" id="total-flows">0</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">Flows/min</div>
+            <div class="value green" id="flows-per-min">0</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">Total Bytes</div>
+            <div class="value yellow" id="total-bytes">0</div>
+        </div>
+        <div class="stat-card">
+            <div class="label">Total Packets</div>
+            <div class="value" id="total-packets">0</div>
+        </div>
+    </div>
+
+    <div class="chart-grid">
+        <div class="chart-container">
+            <h2>Flows Over Time</h2>
+            <canvas id="flowChart"></canvas>
+        </div>
+        <div class="chart-container">
+            <h2>Packets Over Time</h2>
+            <canvas id="packetChart"></canvas>
+        </div>
+    </div>
+
+    <div class="panels">
+        <div class="panel">
+            <h2>Top IP Source</h2>
+            <ul class="panel-list" id="top-talkers"></ul>
+        </div>
+        <div class="panel">
+            <h2>Protocol Distribution</h2>
+            <div class="donut-wrap">
+                <canvas id="protoChart"></canvas>
+                <ul class="donut-legend" id="proto-legend"></ul>
+            </div>
+        </div>
+        <div class="panel">
+            <h2>Top Destination Ports</h2>
+            <ul class="panel-list" id="top-ports"></ul>
+        </div>
+    </div>
+
+    <script>
+        const PROTO_COLORS = { TCP: '#3b82f6', UDP: '#22c55e', ICMP: '#eab308', OTHER: '#8b5cf6' };
+        let selectedMinutes = 30;
+
+        function makeLineChart(canvasId, label, color, rgbaColor) {
+            return new Chart(document.getElementById(canvasId).getContext('2d'), {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: label, data: [], borderColor: color,
+                        backgroundColor: rgbaColor, tension: 0.3,
+                        fill: true, pointRadius: 3, pointBackgroundColor: color,
+                        borderWidth: 2
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    interaction: { mode: 'index', intersect: false },
+                    scales: {
+                        x: { ticks: { color: '#94a3b8', maxTicksLimit: 12 }, grid: { color: '#334155' } },
+                        y: { beginAtZero: true, ticks: { color: '#94a3b8' }, grid: { color: '#334155' } }
+                    },
+                    plugins: {
+                        legend: { labels: { color: '#e2e8f0', usePointStyle: true, pointStyle: 'circle' } },
+                        tooltip: { mode: 'index', intersect: false }
+                    }
+                }
+            });
+        }
+
+        const flowChart = makeLineChart('flowChart', 'Flows', '#3b82f6', 'rgba(59,130,246,0.15)');
+        const packetChart = makeLineChart('packetChart', 'Packets', '#22c55e', 'rgba(34,197,94,0.15)');
+
+        const protoCtx = document.getElementById('protoChart').getContext('2d');
+        const protoChart = new Chart(protoCtx, {
+            type: 'doughnut',
+            data: { labels: [], datasets: [{ data: [], backgroundColor: [] }] },
+            options: {
+                responsive: true,
+                cutout: '65%',
+                plugins: { legend: { display: false } }
+            }
+        });
+
+        function formatBytes(b) {
+            if (b > 1e9) return (b/1e9).toFixed(1) + ' GB';
+            if (b > 1e6) return (b/1e6).toFixed(1) + ' MB';
+            if (b > 1e3) return (b/1e3).toFixed(1) + ' KB';
+            return Math.round(b) + ' B';
+        }
+
+        const PORT_NAMES = {
+            22:'SSH', 53:'DNS', 80:'HTTP', 443:'HTTPS', 3306:'MySQL',
+            3389:'RDP', 5432:'PostgreSQL', 8080:'HTTP-Alt', 8443:'HTTPS-Alt',
+            25:'SMTP', 110:'POP3', 143:'IMAP', 21:'FTP', 23:'Telnet'
+        };
+
+        function portLabel(port) {
+            return PORT_NAMES[port] ? `${port} (${PORT_NAMES[port]})` : `${port}`;
+        }
+
+        async function refresh() {
+            const m = selectedMinutes;
+            const t = Date.now();
+            const [statsRes, talkersRes, protoRes, portsRes] = await Promise.all([
+                fetch(`/api/traffic-stats?minutes=${m}&_=${t}`),
+                fetch(`/api/top-talkers?minutes=${m}&_=${t}`),
+                fetch(`/api/protocol-distribution?minutes=${m}&_=${t}`),
+                fetch(`/api/top-ports?minutes=${m}&_=${t}`)
+            ]);
+            const statsData = await statsRes.json();
+            const stats = statsData.stats;
+            const actualMinutes = statsData.actual_minutes;
+            const talkers = await talkersRes.json();
+            const protos = await protoRes.json();
+            const ports = await portsRes.json();
+
+            // --- Flow chart ---
+            flowChart.data.labels.length = 0;
+            flowChart.data.datasets[0].data.length = 0;
+            stats.forEach(s => {
+                flowChart.data.labels.push(s.time);
+                flowChart.data.datasets[0].data.push(s.flow_count);
+            });
+            flowChart.update();
+
+            // --- Packet chart ---
+            packetChart.data.labels.length = 0;
+            packetChart.data.datasets[0].data.length = 0;
+            stats.forEach(s => {
+                packetChart.data.labels.push(s.time);
+                packetChart.data.datasets[0].data.push(s.total_packets);
+            });
+            packetChart.update();
+
+            // --- Stat cards ---
+            const totalFlows = stats.reduce((a, s) => a + s.flow_count, 0);
+            const totalBytes = stats.reduce((a, s) => a + s.total_bytes, 0);
+            const totalPkts = stats.reduce((a, s) => a + s.total_packets, 0);
+            const avgPerMin = actualMinutes > 0 ? Math.round(totalFlows / actualMinutes) : totalFlows;
+            document.getElementById('total-flows').textContent = totalFlows.toLocaleString();
+            document.getElementById('flows-per-min').textContent = avgPerMin;
+            document.getElementById('total-bytes').textContent = formatBytes(totalBytes);
+            document.getElementById('total-packets').textContent = totalPkts.toLocaleString();
+
+            // --- Top Talkers ---
+            const maxFlows = talkers.length > 0 ? talkers[0].flows : 1;
+            document.getElementById('top-talkers').innerHTML = talkers.slice(0, 8).map(t => {
+                const pct = Math.round((t.flows / maxFlows) * 100);
+                return `<li>
+                    <div><span class="ip">${t.ip}</span><br><span class="meta">${t.flows} flows · ${formatBytes(t.bytes)}</span></div>
+                    <div class="bar-wrap"><div class="bar" style="width:${pct}%"></div></div>
+                </li>`;
+            }).join('');
+
+            // --- Protocol donut ---
+            const labels = protos.map(p => p.protocol || 'OTHER');
+            const values = protos.map(p => p.count);
+            const colors = labels.map(l => PROTO_COLORS[l] || PROTO_COLORS.OTHER);
+            protoChart.data.labels.length = 0;
+            protoChart.data.datasets[0].data.length = 0;
+            protoChart.data.datasets[0].backgroundColor.length = 0;
+            labels.forEach((l, i) => {
+                protoChart.data.labels.push(l);
+                protoChart.data.datasets[0].data.push(values[i]);
+                protoChart.data.datasets[0].backgroundColor.push(colors[i]);
+            });
+            protoChart.update();
+
+            const totalProto = values.reduce((a, v) => a + v, 0) || 1;
+            document.getElementById('proto-legend').innerHTML = labels.map((l, i) =>
+                `<li><span class="dot" style="background:${colors[i]}"></span>${l}: ${values[i]} (${Math.round(values[i]/totalProto*100)}%)</li>`
+            ).join('');
+
+            // --- Top Ports ---
+            const maxPort = ports.length > 0 ? ports[0].count : 1;
+            const barColors = ['blue', 'green', 'yellow', 'red', 'purple'];
+            document.getElementById('top-ports').innerHTML = ports.slice(0, 8).map((p, i) => {
+                const pct = Math.round((p.count / maxPort) * 100);
+                const bc = barColors[i % barColors.length];
+                return `<li>
+                    <div><span class="ip">${portLabel(p.port)}</span><br><span class="meta"><span class="proto-badge proto-${p.protocol}">${p.protocol}</span> · ${p.count} flows</span></div>
+                    <div class="bar-wrap"><div class="bar ${bc}" style="width:${pct}%"></div></div>
+                </li>`;
+            }).join('');
+        }
+
+        refresh();
+        setInterval(refresh, 5000);
+
+        // Time range selector
+        document.querySelectorAll('.time-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.time-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                selectedMinutes = parseInt(btn.dataset.minutes);
+                refresh();
+            });
+        });
+    </script>
+</body>
+</html>
