@@ -1,15 +1,22 @@
 import sys
 import os
-import time
+import logging
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from flask import Flask, render_template, jsonify, request, make_response
+from flask import Flask, render_template, jsonify, request
 import database as db
 from state import state
 
 app = Flask(__name__)
+logger = logging.getLogger("dashboard")
 
-app = Flask(__name__)
+
+def normalize_alert_status(status):
+    if status == "Active":
+        return "Open"
+    if status in ("Resolved", "Confirmed"):
+        return "Resolved"
+    return status
 
 
 @app.after_request
@@ -19,6 +26,36 @@ def add_no_cache(response):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
     return response
+
+
+def _json_payload():
+    # Accept empty POST bodies so route defaults still work.
+    return request.get_json(silent=True) or {}
+
+
+def _coerce_non_negative_int(value, default, field_name):
+    if value is None or value == "":
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{field_name} must be integer >= 0")
+    if parsed < 0:
+        raise ValueError(f"{field_name} must be integer >= 0")
+    return parsed
+
+
+def _coerce_float(value, default, field_name):
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{field_name} must be number")
+
+
+def _json_error(message, status_code=400):
+    return jsonify({"error": message}), status_code
 
 
 @app.route("/")
@@ -117,8 +154,8 @@ def api_top_ports():
 
 @app.route("/api/alerts")
 def api_alerts():
-    limit = request.args.get("limit", 100, type=int)
-    status = request.args.get("status", None)
+    limit = request.args.get("limit", 0, type=int)
+    status = request.args.get("status", "All")
     minutes = request.args.get("minutes", None, type=int)
     alerts = db.get_alerts(limit, status, minutes)
     data = []
@@ -135,18 +172,20 @@ def api_alerts():
             "total_packets": a["total_packets"],
             "duration": float(a["duration"] or 0),
             "anomaly_score": float(a["anomaly_score"] or 0),
-            "status": a["status"],
+            "status": normalize_alert_status(a["status"]),
         })
     return jsonify(data)
 
 
 @app.route("/api/alert-summary")
 def api_alert_summary():
-    summary = db.get_alert_summary()
+    minutes = request.args.get("minutes", None, type=int)
+    summary = db.get_alert_summary(minutes)
     return jsonify({
         "total": summary["total"],
-        "active": summary["active"],
+        "open": summary["active"],
         "resolved": summary["resolved"],
+        "false_positive": summary["false_positive"],
         "avg_score": round(float(summary["avg_score"]), 1),
     })
 
@@ -159,10 +198,12 @@ def api_resolve_alert(alert_id):
 
 @app.route("/api/learning_mode", methods=["POST"])
 def api_learning_mode():
-    data = request.get_json()
-    duration_mins = data.get("duration", 10)
-    state.learning_mode = True
-    state.learning_mode_until = time.time() + (duration_mins * 60)
+    data = _json_payload()
+    try:
+        duration_mins = _coerce_non_negative_int(data.get("duration", 10), 10, "duration")
+    except ValueError as exc:
+        return _json_error(str(exc))
+    state.enable_learning_mode(duration_mins)
     return jsonify({"ok": True, "until": state.learning_mode_until})
 
 @app.route("/api/alerts/<int:alert_id>/detail")
@@ -171,41 +212,21 @@ def api_alert_detail(alert_id):
     if not a:
         return jsonify({"error": "not found"}), 404
     
-    # Feature contribution analysis
     contributions = []
     if state.lstm_service:
         try:
-            # Fetch the flow and the 49 preceding flows to reconstruct the sequence
-            conn = db.get_connection()
-            cur = conn.cursor(cursor_factory=db.psycopg2.extras.RealDictCursor)
-            cur.execute("""
-                SELECT dst_port_feat, fwd_pkt_len_min, flow_pkts_per_s, bwd_pkts_per_s,
-                       fwd_iat_min, ece_flag_cnt, ack_flag_cnt, fwd_seg_size_min,
-                       fwd_act_data_pkts, idle_std
-                FROM flows 
-                WHERE id <= %s 
-                ORDER BY created_at DESC LIMIT 50
-            """, (a["flow_id"],))
-            rows = cur.fetchall()
-            cur.close()
-            conn.close()
-            
-            if len(rows) == 50:
-                # reverse to get chronological order
-                sequence = [list(r.values()) for r in reversed(rows)]
+            sequence = db.get_flow_feature_sequence(a["flow_id"], state.lstm_service.seq_len, selected_features=state.lstm_service.selected_features)
+            if len(sequence) == state.lstm_service.seq_len:
                 import numpy as np
+
                 seq_array = np.array(sequence, dtype=np.float32)
-                # We must scale it using the service's scaler
-                scaled_seq = state.lstm_service.scale_features(seq_array)
-                
+                scaled_seq = state.lstm_service.scale_sequence(seq_array)
                 _, _, feature_errors = state.lstm_service.predict(scaled_seq)
                 feature_names = state.lstm_service.get_feature_names()
-                
-                # Zip names and errors, sort by error descending
                 sorted_contribs = sorted(zip(feature_names, feature_errors), key=lambda x: x[1], reverse=True)
                 contributions = [{"feature": name, "error": float(err)} for name, err in sorted_contribs]
         except Exception as e:
-            print(f"Error computing contributions: {e}")
+            logger.warning("Error computing contributions for alert %s: %s", alert_id, e)
 
     return jsonify({
         "id": a["id"],
@@ -220,7 +241,7 @@ def api_alert_detail(alert_id):
         "total_packets": a["total_packets"],
         "duration": float(a["duration"] or 0),
         "anomaly_score": float(a["anomaly_score"] or 0),
-        "status": a["status"],
+        "status": normalize_alert_status(a["status"]),
         "contributions": contributions
     })
 
@@ -239,19 +260,30 @@ def api_false_positive_alert(alert_id):
 
 @app.route("/api/alerts/bulk", methods=["POST"])
 def api_bulk_alerts():
-    data = request.get_json()
+    data = _json_payload()
     ids = data.get("ids", [])
     action = data.get("action", "")
-    if not ids or action not in ("Resolved", "False Positive", "Confirmed"):
-        return jsonify({"error": "invalid"}), 400
+    if not isinstance(ids, list):
+        return _json_error("ids must be array of positive integers")
+    try:
+        ids = [int(alert_id) for alert_id in ids]
+    except (TypeError, ValueError):
+        return _json_error("ids must be array of positive integers")
+    if not ids or any(alert_id <= 0 for alert_id in ids):
+        return _json_error("ids must be array of positive integers")
+    if action not in ("Resolved", "False Positive"):
+        return _json_error("action must be Resolved or False Positive")
     db.bulk_update_alerts(ids, action)
     return jsonify({"ok": True, "count": len(ids)})
 
 
 @app.route("/api/alerts/auto-dismiss", methods=["POST"])
 def api_auto_dismiss():
-    data = request.get_json()
-    max_score = data.get("max_score", 40)
+    data = _json_payload()
+    try:
+        max_score = _coerce_float(data.get("max_score", 40), 40.0, "max_score")
+    except ValueError as exc:
+        return _json_error(str(exc))
     count = db.bulk_resolve_by_score(max_score)
     return jsonify({"ok": True, "dismissed": count})
 

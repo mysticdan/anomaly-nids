@@ -23,6 +23,10 @@
         .stat-card .icon.gray { background: #94a3b8; }
         .stat-card .label { font-size: 12px; color: #94a3b8; margin-bottom: 6px; }
         .stat-card .value { font-size: 28px; font-weight: 700; }
+        .status-badge { display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 11px; font-weight: 700; letter-spacing: 0.02em; }
+        .status-open { background: #7f1d1d; color: #fecaca; }
+        .status-resolved { background: #064e3b; color: #a7f3d0; }
+        .status-fp { background: #334155; color: #cbd5e1; }
         .table-section { margin: 20px 30px; background: #1e293b; border-radius: 10px; padding: 20px; border: 1px solid #334155; }
         .table-section h2 { font-size: 16px; margin-bottom: 16px; }
         table { width: 100%; border-collapse: collapse; }
@@ -53,6 +57,12 @@
         .time-ctrl { display: flex; align-items: center; gap: 10px; margin-left: auto; background: #0f172a; padding: 6px 12px; border-radius: 6px; border: 1px solid #334155; }
         .time-ctrl span { font-size: 12px; color: #94a3b8; }
         .time-ctrl input { width: 50px; background: transparent; border: 1px solid #334155; color: white; border-radius: 4px; padding: 2px 5px; font-size: 12px; text-align: center; }
+        .status-ctrl { display: flex; align-items: center; gap: 10px; background: #0f172a; padding: 6px 12px; border-radius: 6px; border: 1px solid #334155; }
+        .status-ctrl span { font-size: 12px; color: #94a3b8; }
+        .status-ctrl select { background: transparent; border: 1px solid #334155; color: white; border-radius: 4px; padding: 4px 8px; font-size: 12px; }
+        .table-section .sub { font-size: 12px; color: #94a3b8; margin-top: -10px; margin-bottom: 16px; }
+        .row-muted { opacity: 0.78; }
+        .empty-state { text-align: center; color: #94a3b8; padding: 24px 12px; }
         input[type="checkbox"] { accent-color: #3b82f6; }
     </style>
 </head>
@@ -74,16 +84,16 @@
             <div class="value" id="total-alerts">0</div>
         </div>
         <div class="stat-card">
-            <div class="label"><span class="icon blue"></span> Active</div>
-            <div class="value" id="active-alerts">0</div>
+            <div class="label"><span class="icon blue"></span> Open</div>
+            <div class="value" id="open-alerts">0</div>
         </div>
         <div class="stat-card">
             <div class="label"><span class="icon green"></span> Resolved</div>
             <div class="value" id="resolved-alerts">0</div>
         </div>
         <div class="stat-card">
-            <div class="label"><span class="icon gray"></span> Avg Score</div>
-            <div class="value" id="avg-score">0</div>
+            <div class="label"><span class="icon gray"></span> False Positive</div>
+            <div class="value" id="false-positive-alerts">0</div>
         </div>
     </div>
 
@@ -95,29 +105,40 @@
         <button class="bulk-btn" onclick="selectAll()">☑ Select All</button>
         <button class="bulk-btn" onclick="deselectAll()">☐ Deselect All</button>
         <span class="selected-count" id="sel-count"></span>
+        <div class="status-ctrl">
+            <span>Status:</span>
+            <select id="status-filter" onchange="refresh()">
+                <option value="All">All</option>
+                <option value="Open">Open</option>
+                <option value="Resolved">Resolved</option>
+                <option value="False Positive">False Positive</option>
+            </select>
+        </div>
         <div class="time-ctrl">
             <span>Time Range:</span>
             <input type="number" id="time-range" value="30" onchange="refresh()">
-            <span>min</span>
+            <span>min · 0 = all</span>
         </div>
     </div>
 
     <div class="table-section">
-        <h2>Active Security Alerts</h2>
+        <h2>Security Alerts</h2>
+        <div class="sub">Ordered by earliest detection time first.</div>
         <table>
             <thead>
                 <tr>
                     <th style="width:30px"><input type="checkbox" id="chk-all" onchange="toggleAll(this)"></th>
-                    <th>Time ↕</th>
-                    <th>Source IP ↕</th>
-                    <th>Dest IP ↕</th>
-                    <th>Source Port ↕</th>
-                    <th>Dest Port ↕</th>
-                    <th>Protocol ↕</th>
-                    <th>Bytes ↕</th>
-                    <th>Packets ↕</th>
-                    <th>Duration ↕</th>
-                    <th>Score ↕</th>
+                    <th>Time</th>
+                    <th>Status</th>
+                    <th>Source IP</th>
+                    <th>Dest IP</th>
+                    <th>Source Port</th>
+                    <th>Dest Port</th>
+                    <th>Protocol</th>
+                    <th>Bytes</th>
+                    <th>Packets</th>
+                    <th>Duration</th>
+                    <th>Score</th>
                     <th>Action</th>
                 </tr>
             </thead>
@@ -137,11 +158,20 @@
 
         function formatTime(ts) {
             if (!ts) return '-';
-            return new Date(ts * 1000).toLocaleTimeString();
+            return new Date(ts * 1000).toLocaleString();
         }
 
         function protoBadge(p) {
             return `<span class="proto-badge proto-${p}">${p}</span>`;
+        }
+
+        function statusBadge(status) {
+            const cls = status === 'Open' ? 'status-open' : status === 'Resolved' ? 'status-resolved' : 'status-fp';
+            return `<span class="status-badge ${cls}">${status}</span>`;
+        }
+
+        function rowClass(status) {
+            return status === 'Open' ? '' : 'row-muted';
         }
 
         function getSelected() {
@@ -198,23 +228,28 @@
 
         async function refresh() {
             const minutes = document.getElementById('time-range').value;
+            const status = document.getElementById('status-filter').value;
             const [summaryRes, alertsRes] = await Promise.all([
-                fetch('/api/alert-summary'),
-                fetch(`/api/alerts?limit=100&minutes=${minutes}`)
+                fetch(`/api/alert-summary?minutes=${minutes}`),
+                fetch(`/api/alerts?limit=0&minutes=${minutes}&status=${encodeURIComponent(status)}`)
             ]);
             const summary = await summaryRes.json();
             allAlerts = await alertsRes.json();
 
             document.getElementById('total-alerts').textContent = summary.total;
-            document.getElementById('active-alerts').textContent = summary.active;
+            document.getElementById('open-alerts').textContent = summary.open;
             document.getElementById('resolved-alerts').textContent = summary.resolved;
-            document.getElementById('avg-score').textContent = summary.avg_score;
+            document.getElementById('false-positive-alerts').textContent = summary.false_positive;
 
             const tbody = document.getElementById('alerts-table');
-            tbody.innerHTML = allAlerts.map(a => `
-                <tr>
-                    <td><input type="checkbox" class="alert-chk" value="${a.id}" onchange="updateCount()" ${a.status !== 'Active' ? 'disabled' : ''}></td>
+            if (allAlerts.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="13" class="empty-state">No alerts match the selected time range and status filter.</td></tr>';
+            } else {
+                tbody.innerHTML = allAlerts.map(a => `
+                <tr class="${rowClass(a.status)}">
+                    <td><input type="checkbox" class="alert-chk" value="${a.id}" onchange="updateCount()" ${a.status !== 'Open' ? 'disabled' : ''}></td>
                     <td>${formatTime(a.timestamp)}</td>
+                    <td>${statusBadge(a.status)}</td>
                     <td>${a.src_ip}</td>
                     <td>${a.dst_ip}</td>
                     <td>${a.src_port}</td>
@@ -227,6 +262,7 @@
                     <td><a href="/alerts/${a.id}" class="btn-view">📝 Detail</a></td>
                 </tr>
             `).join('');
+            }
 
             document.getElementById('chk-all').checked = false;
             updateCount();

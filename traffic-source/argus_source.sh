@@ -14,10 +14,10 @@ cleanup() {
 }
 trap cleanup SIGINT SIGTERM EXIT
 
-FIELDS="stime,ltime,saddr,daddr,sport,dport,proto,dur,sbytes,dbytes,spkts,dpkts,flgs,state,sttl,dttl,smeansz,dmeansz,sminsz,dminsz,smaxsz,dmaxsz,sintpkt,dintpkt,sjit,djit,sload,dload,sloss,dloss"
+FIELDS="stime,ltime,saddr,daddr,sport,dport,proto,dur,sbytes,dbytes,spkts,dpkts,flgs,state,sttl,dttl,smeansz,dmeansz,sminsz,dminsz,smaxsz,dmaxsz,sintpkt,dintpkt,sjit,djit,sload,dload,sloss,dloss,sappbytes,dappbytes,swin,dwin"
 
 # Stream langsung ke stdout untuk dibaca main.py
-sudo argus -i "$INTERFACE" -w - | ra -n -c ',' -s "$FIELDS" -u
+sudo argus -X -A -S 1 -i "$INTERFACE" -w - | ra -M noman -n -c ',' -s "$FIELDS" -u
 PIPE_PID=$!
 
 wait "$PIPE_PID"

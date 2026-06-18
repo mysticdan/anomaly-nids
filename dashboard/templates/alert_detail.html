@@ -36,13 +36,13 @@
         .verify-section h3 { font-size: 15px; margin-bottom: 4px; }
         .verify-section .sub { font-size: 12px; color: #94a3b8; margin-bottom: 20px; }
         .verify-btns { display: flex; gap: 16px; }
-        .btn-confirm { flex: 1; padding: 14px; border: none; border-radius: 10px; font-size: 14px; font-weight: 600; cursor: pointer; background: #ef4444; color: white; }
-        .btn-confirm:hover { background: #dc2626; }
+        .btn-resolve { flex: 1; padding: 14px; border: none; border-radius: 10px; font-size: 14px; font-weight: 600; cursor: pointer; background: #16a34a; color: white; }
+        .btn-resolve:hover { background: #15803d; }
         .btn-fp { flex: 1; padding: 14px; border: 1px solid #334155; border-radius: 10px; font-size: 14px; font-weight: 600; cursor: pointer; background: #1e293b; color: #94a3b8; }
         .btn-fp:hover { background: #334155; color: #e2e8f0; }
         .hint { text-align: center; font-size: 12px; color: #94a3b8; margin-top: 12px; }
         .done-msg { text-align: center; padding: 20px; font-size: 16px; font-weight: 600; }
-        .done-msg.confirmed { color: #ef4444; }
+        .done-msg.resolved { color: #22c55e; }
         .done-msg.fp { color: #94a3b8; }
     </style>
 </head>
@@ -87,7 +87,7 @@
         </div>
         <div class="card" style="grid-column: span 2;">
             <h3>Anomaly Analysis: Feature Contributions</h3>
-            <div class="card-sub">Features that contributed most to the reconstruction error (MSE)</div>
+            <div class="card-sub">Features that contributed most to the reconstruction error (MAE)</div>
             <div id="contrib-list" style="display:grid; grid-template-columns: repeat(2, 1fr); gap:20px 40px;">
                 <div style="color:#94a3b8; font-size:13px; font-style:italic;">Analyzing features...</div>
             </div>
@@ -96,12 +96,12 @@
 
     <div class="verify-section" id="verify-section">
         <h3>Alert Verification</h3>
-        <div class="sub">Please confirm whether this is a real threat or a false positive</div>
+        <div class="sub">Resolve the alert after handling it, or mark it as a false positive.</div>
         <div class="verify-btns">
-            <button class="btn-confirm" onclick="confirmAlert()">⚠ Confirm Real Anomaly</button>
+            <button class="btn-resolve" onclick="resolveAlert()">✓ Mark as Resolved</button>
             <button class="btn-fp" onclick="markFP()">Mark as False Positive</button>
         </div>
-        <div class="hint">Your confirmation helps improve the accuracy of future threat detection</div>
+        <div class="hint">Resolved means the alert was valid and has been handled.</div>
     </div>
 
     <script>
@@ -150,16 +150,16 @@
                 document.getElementById('contrib-list').innerHTML = '<div style="color:#94a3b8; font-size:13px;">No contribution data available.</div>';
             }
 
-            if (a.status !== 'Active') {
+            if (a.status !== 'Open') {
                 const sec = document.getElementById('verify-section');
-                const cls = a.status === 'Confirmed' ? 'confirmed' : 'fp';
-                const msg = a.status === 'Confirmed' ? '⚠ Confirmed as Real Anomaly' : '✅ Marked as False Positive';
+                const cls = a.status === 'Resolved' ? 'resolved' : 'fp';
+                const msg = a.status === 'Resolved' ? '✓ Marked as Resolved' : 'Marked as False Positive';
                 sec.innerHTML = `<div class="done-msg ${cls}">${msg}</div>`;
             }
         }
 
-        async function confirmAlert() {
-            await fetch(`/api/alerts/${ALERT_ID}/confirm`, { method: 'POST' });
+        async function resolveAlert() {
+            await fetch(`/api/alerts/${ALERT_ID}/resolve`, { method: 'POST' });
             load();
         }
 

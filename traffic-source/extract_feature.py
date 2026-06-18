@@ -1,289 +1,445 @@
 #!/usr/bin/env python3
 """
-Feature Extractor - Argus Flow Records to CSE-CICIDS-2018 Features
+Feature extractor for dual-stage LSTM-AE runtime.
 
-Reads argus CSV flow records and extracts 10 features compatible with
-the CSE-CICIDS-2018 dataset format for LSTM-AE anomaly detection.
+Runtime stores union of 19 features needed by all supported variants. Active
+model ordering still comes from metadata-selected features.
 
-10 Features:
-  1. Dst Port           - Destination port number
-  2. Fwd Pkt Len Min    - Minimum forward packet length
-  3. Flow Pkts/s        - Total packets per second in the flow
-  4. Bwd Pkts/s         - Backward packets per second
-  5. Fwd IAT Min        - Minimum forward inter-arrival time
-  6. ECE Flag Cnt       - ECE flag count from TCP flags
-  7. ACK Flag Cnt       - ACK flag count from TCP flags
-  8. Fwd Seg Size Min   - Minimum forward segment size
-  9. Fwd Act Data Pkts  - Forward packets with payload > 0
-  10. Idle Std          - Std deviation of idle times
+Argus does not expose CICFlowMeter bulk/subflow semantics directly, so live
+pipeline uses stateful approximations based on repeated flow updates:
+- bulk features estimated from packet/byte deltas grouped by short gaps
+- subflow forward bytes estimated from forward-byte deltas separated by idle gaps
+- Flow IAT Mean approximated from duration / (total packets - 1)
 """
 
-import sys
-import csv
 import argparse
-import re
-import time
+import csv
 import json
 import logging
+import os
+import sys
+import time
+from dataclasses import dataclass, field
 from io import StringIO
-from collections import defaultdict
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
-import numpy as np
+ROOT_DIR = os.path.join(os.path.dirname(__file__), "..")
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
 
-# =================================================================
-# Argus CSV Header Mapping
-# =================================================================
-ARGUS_FIELDS = [
-    "stime", "ltime", "saddr", "daddr", "sport", "dport", "proto",
-    "dur", "sbytes", "dbytes", "spkts", "dpkts", "flgs", "state",
-    "sttl", "dttl", "smeansz", "dmeansz", "sminsz", "dminsz",
-    "smaxsz", "dmaxsz", "sintpkt", "dintpkt", "sjit", "djit",
-    "sload", "dload", "sloss", "dloss"
-]
+from feature_schema import FEATURE_KEYS, FEATURE_SET_VERSION, ordered_feature_values
 
 logger = logging.getLogger("feature_extractor")
 
+ARGUS_FIELDS = [
+    "stime",
+    "ltime",
+    "saddr",
+    "daddr",
+    "sport",
+    "dport",
+    "proto",
+    "dur",
+    "sbytes",
+    "dbytes",
+    "spkts",
+    "dpkts",
+    "flgs",
+    "state",
+    "sttl",
+    "dttl",
+    "smeansz",
+    "dmeansz",
+    "sminsz",
+    "dminsz",
+    "smaxsz",
+    "dmaxsz",
+    "sintpkt",
+    "dintpkt",
+    "sjit",
+    "djit",
+    "sload",
+    "dload",
+    "sloss",
+    "dloss",
+    "sappbytes",
+    "dappbytes",
+    "swin",
+    "dwin",
+]
+
 
 def safe_float(val: str, default: float = 0.0) -> float:
-    """Safely convert string to float."""
     try:
-        if val is None or val.strip() in ("", "-", "*"):
+        if val is None or str(val).strip() in ("", "-", "*"):
             return default
-        return float(val.strip())
-    except (ValueError, AttributeError):
+        return float(str(val).strip())
+    except (TypeError, ValueError):
         return default
 
 
 def safe_int(val: str, default: int = 0) -> int:
-    """Safely convert string to int."""
     try:
-        if val is None or val.strip() in ("", "-", "*"):
+        if val is None or str(val).strip() in ("", "-", "*"):
             return default
-        return int(float(val.strip()))
-    except (ValueError, AttributeError):
+        return int(float(str(val).strip()))
+    except (TypeError, ValueError):
         return default
 
 
-def parse_tcp_flags(flags_str: str) -> Dict[str, int]:
-    """
-    Parse Argus TCP flags string to individual flag counts.
-    
-    Argus flags format examples:
-      'e*sA' = ECE + SYN + ACK (from source/dest directions)
-      ' rR'  = RST
-      's'    = SYN
-      'A'    = ACK
-      
-    CSE-CICIDS-2018 flag mapping:
-      - ECE Flag Cnt: count of 'e' or 'E' (ECE/ECN-Echo)
-      - ACK Flag Cnt: count of 'A' or 'a' (ACK)
-    """
-    flags = {
-        "ece": 0,
-        "ack": 0,
-        "syn": 0,
-        "fin": 0,
-        "rst": 0,
-        "psh": 0,
-        "urg": 0,
-    }
-    if not flags_str or flags_str.strip() in ("", "-", "*"):
-        return flags
-
-    f = flags_str.strip()
-    # Argus uses: e=ECE, s/S=SYN, a/A=ACK, f/F=FIN, r/R=RST, p/P=PSH, u/U=URG
-    flags["ece"] = sum(1 for c in f if c in ("e", "E"))
-    flags["ack"] = sum(1 for c in f if c in ("a", "A"))
-    flags["syn"] = sum(1 for c in f if c in ("s", "S"))
-    flags["fin"] = sum(1 for c in f if c in ("f", "F"))
-    flags["rst"] = sum(1 for c in f if c in ("r", "R"))
-    flags["psh"] = sum(1 for c in f if c in ("p", "P"))
-    flags["urg"] = sum(1 for c in f if c in ("u", "U"))
-
-    return flags
-
-
 def parse_protocol(proto_str: str) -> str:
-    """Parse protocol string (tcp/udp/icmp/etc)."""
     if not proto_str:
         return "unknown"
-    p = proto_str.strip().lower()
-    if p in ("tcp", "6"):
+
+    proto = proto_str.strip().lower()
+    if proto in ("tcp", "6"):
         return "tcp"
-    elif p in ("udp", "17"):
+    if proto in ("udp", "17"):
         return "udp"
-    elif p in ("icmp", "1"):
+    if proto in ("icmp", "1"):
         return "icmp"
-    return p
+    return proto
+
+
+@dataclass
+class BulkAccumulator:
+    bulk_count: int = 0
+    total_packets: int = 0
+    total_bytes: float = 0.0
+    total_duration: float = 0.0
+    candidate_packets: int = 0
+    candidate_bytes: float = 0.0
+    candidate_start: float = 0.0
+    candidate_end: float = 0.0
+    candidate_updates: int = 0
+
+
+@dataclass
+class FlowState:
+    last_stime: float
+    last_ltime: float
+    last_spkts: int
+    last_dpkts: int
+    last_sbytes: float
+    last_dbytes: float
+    last_sappbytes: float
+    last_dappbytes: float
+    initial_fwd_window: float
+    subflow_count: int = 1
+    archived_subflow_fwd_bytes: float = 0.0
+    current_subflow_fwd_bytes: float = 0.0
+    fwd_bulk: BulkAccumulator = field(default_factory=BulkAccumulator)
+    bwd_bulk: BulkAccumulator = field(default_factory=BulkAccumulator)
 
 
 class FlowTracker:
-    """
-    Track flow state untuk menghitung inter-arrival times dan idle times.
-    
-    Setiap flow diidentifikasi oleh (src_ip, dst_ip, src_port, dst_port, proto).
-    Menyimpan timestamp packet terakhir untuk menghitung IAT dan idle time.
-    """
+    """Track flow-local state for bulk and subflow approximations."""
 
     def __init__(self):
-        self.flows: Dict[str, List[float]] = defaultdict(list)
-        self.idle_times: Dict[str, List[float]] = defaultdict(list)
-        self.fwd_timestamps: Dict[str, List[float]] = defaultdict(list)
-        self.idle_threshold = 1.0  # seconds - threshold for idle detection
+        self.flow_states: Dict[str, FlowState] = {}
+        self.bulk_gap_threshold = 1.0
+        self.bulk_packet_threshold = 4
+        self.subflow_gap_threshold = 1.0
+        self.bulk_duration_floor = 1.0
+        self.max_bulk_packets_per_average = 256.0
+        self.max_bulk_bytes_per_average = 65535.0
+        self.max_bulk_rate_average = 65535.0
 
     def get_flow_key(self, row: Dict) -> str:
-        """Generate unique flow key."""
-        return f"{row.get('saddr','')}-{row.get('daddr','')}-{row.get('sport','')}-{row.get('dport','')}-{row.get('proto','')}"
+        return "-".join(
+            [
+                row.get("saddr", ""),
+                row.get("daddr", ""),
+                row.get("sport", ""),
+                row.get("dport", ""),
+                row.get("proto", ""),
+            ]
+        )
 
-    def update(self, flow_key: str, stime: float, ltime: float, duration: float):
-        """Update flow tracker with new flow record."""
-        self.flows[flow_key].append(stime)
+    def _new_state(
+        self,
+        stime: float,
+        ltime: float,
+        spkts: int,
+        dpkts: int,
+        sbytes: float,
+        dbytes: float,
+        sappbytes: float,
+        dappbytes: float,
+        swin: float,
+    ) -> FlowState:
+        return FlowState(
+            last_stime=stime,
+            last_ltime=ltime,
+            last_spkts=spkts,
+            last_dpkts=dpkts,
+            last_sbytes=sbytes,
+            last_dbytes=dbytes,
+            last_sappbytes=sappbytes,
+            last_dappbytes=dappbytes,
+            initial_fwd_window=self._normalize_tcp_window(swin),
+            current_subflow_fwd_bytes=max(sbytes, 0.0),
+        )
 
-        # Track forward inter-arrival times
-        if len(self.flows[flow_key]) > 1:
-            iat = stime - self.flows[flow_key][-2]
-            self.fwd_timestamps[flow_key].append(iat)
+    def _normalize_tcp_window(self, window_value: float) -> float:
+        return min(max(window_value, 0.0), 65535.0)
 
-            # Track idle times (IAT > threshold)
-            if iat > self.idle_threshold:
-                self.idle_times[flow_key].append(iat)
+    def _looks_like_new_flow(
+        self,
+        state: FlowState,
+        stime: float,
+        ltime: float,
+        spkts: int,
+        dpkts: int,
+        sbytes: float,
+        dbytes: float,
+    ) -> bool:
+        if stime > state.last_ltime + 1e-6:
+            return True
 
-    def get_fwd_iat_min(self, flow_key: str) -> float:
-        """Get minimum forward inter-arrival time."""
-        iats = self.fwd_timestamps.get(flow_key, [])
-        return min(iats) if iats else 0.0
+        return any(
+            [
+                ltime < state.last_ltime,
+                spkts < state.last_spkts,
+                dpkts < state.last_dpkts,
+                sbytes < state.last_sbytes,
+                dbytes < state.last_dbytes,
+            ]
+        )
 
-    def get_idle_std(self, flow_key: str) -> float:
-        """Get standard deviation of idle times."""
-        idles = self.idle_times.get(flow_key, [])
-        if len(idles) < 2:
-            return 0.0
-        return float(np.std(idles))
+    def _flush_bulk_candidate(self, accumulator: BulkAccumulator):
+        if (
+            accumulator.candidate_packets >= self.bulk_packet_threshold
+            and accumulator.candidate_updates >= 2
+            and accumulator.candidate_bytes > 0
+        ):
+            duration = max(accumulator.candidate_end - accumulator.candidate_start, self.bulk_duration_floor)
+            accumulator.bulk_count += 1
+            accumulator.total_packets += accumulator.candidate_packets
+            accumulator.total_bytes += accumulator.candidate_bytes
+            accumulator.total_duration += duration
+
+        accumulator.candidate_packets = 0
+        accumulator.candidate_bytes = 0.0
+        accumulator.candidate_start = 0.0
+        accumulator.candidate_end = 0.0
+        accumulator.candidate_updates = 0
+
+    def _update_bulk(
+        self,
+        accumulator: BulkAccumulator,
+        delta_packets: int,
+        delta_payload_bytes: float,
+        gap: float,
+        previous_time: float,
+        current_time: float,
+    ):
+        if accumulator.candidate_packets > 0 and gap > self.bulk_gap_threshold:
+            self._flush_bulk_candidate(accumulator)
+
+        if delta_packets <= 0 or delta_payload_bytes <= 0:
+            return
+
+        if accumulator.candidate_packets == 0:
+            accumulator.candidate_start = previous_time if previous_time > 0 else current_time
+            accumulator.candidate_end = current_time
+        else:
+            accumulator.candidate_end = current_time
+
+        accumulator.candidate_packets += delta_packets
+        accumulator.candidate_bytes += delta_payload_bytes
+        accumulator.candidate_updates += 1
+
+    def update(
+        self,
+        flow_key: str,
+        stime: float,
+        ltime: float,
+        spkts: int,
+        dpkts: int,
+        sbytes: float,
+        dbytes: float,
+        sappbytes: float,
+        dappbytes: float,
+        swin: float,
+        proto: str,
+    ) -> FlowState:
+        state = self.flow_states.get(flow_key)
+        if state is None:
+            state = self._new_state(stime, ltime, spkts, dpkts, sbytes, dbytes, sappbytes, dappbytes, swin)
+            self.flow_states[flow_key] = state
+            return state
+
+        if self._looks_like_new_flow(state, stime, ltime, spkts, dpkts, sbytes, dbytes):
+            self._flush_bulk_candidate(state.fwd_bulk)
+            self._flush_bulk_candidate(state.bwd_bulk)
+            state = self._new_state(stime, ltime, spkts, dpkts, sbytes, dbytes, sappbytes, dappbytes, swin)
+            self.flow_states[flow_key] = state
+            return state
+
+        delta_spkts = max(0, spkts - state.last_spkts)
+        delta_dpkts = max(0, dpkts - state.last_dpkts)
+        delta_sbytes = max(0.0, sbytes - state.last_sbytes)
+        delta_dbytes = max(0.0, dbytes - state.last_dbytes)
+        delta_sappbytes = max(0.0, sappbytes - state.last_sappbytes)
+        delta_dappbytes = max(0.0, dappbytes - state.last_dappbytes)
+        gap = max(0.0, ltime - state.last_ltime)
+
+        if swin > 0 and state.initial_fwd_window <= 0:
+            state.initial_fwd_window = self._normalize_tcp_window(swin)
+
+        if gap > self.subflow_gap_threshold:
+            state.archived_subflow_fwd_bytes += state.current_subflow_fwd_bytes
+            state.current_subflow_fwd_bytes = delta_sbytes
+            if delta_spkts > 0 or delta_dpkts > 0 or delta_sbytes > 0 or delta_dbytes > 0:
+                state.subflow_count += 1
+        else:
+            state.current_subflow_fwd_bytes += delta_sbytes
+
+        if proto == "tcp":
+            self._update_bulk(state.fwd_bulk, delta_spkts, delta_sappbytes, gap, state.last_ltime, ltime)
+            self._update_bulk(state.bwd_bulk, delta_dpkts, delta_dappbytes, gap, state.last_ltime, ltime)
+
+        state.last_stime = stime
+        state.last_ltime = ltime
+        state.last_spkts = spkts
+        state.last_dpkts = dpkts
+        state.last_sbytes = sbytes
+        state.last_dbytes = dbytes
+        state.last_sappbytes = sappbytes
+        state.last_dappbytes = dappbytes
+        return state
+
+    def _bulk_snapshot(
+        self,
+        accumulator: BulkAccumulator,
+        _fallback_packets: int,
+        _fallback_bytes: float,
+        _fallback_duration: float,
+    ) -> Dict[str, float]:
+        bulk_count = accumulator.bulk_count
+        total_packets = accumulator.total_packets
+        total_bytes = accumulator.total_bytes
+        total_duration = accumulator.total_duration
+
+        if (
+            accumulator.candidate_packets >= self.bulk_packet_threshold
+            and accumulator.candidate_updates >= 2
+            and accumulator.candidate_bytes > 0
+        ):
+            bulk_count += 1
+            total_packets += accumulator.candidate_packets
+            total_bytes += accumulator.candidate_bytes
+            total_duration += max(accumulator.candidate_end - accumulator.candidate_start, self.bulk_duration_floor)
+
+        if bulk_count == 0:
+            return {
+                "bulk_count": 0.0,
+                "pkts_per_bulk_avg": 0.0,
+                "byts_per_bulk_avg": 0.0,
+                "blk_rate_avg": 0.0,
+            }
+
+        pkts_per_bulk_avg = min(float(total_packets) / bulk_count, self.max_bulk_packets_per_average)
+        byts_per_bulk_avg = min(float(total_bytes) / bulk_count, self.max_bulk_bytes_per_average)
+        blk_rate_avg = min(float(total_bytes) / max(total_duration, self.bulk_duration_floor), self.max_bulk_rate_average)
+
+        return {
+            "bulk_count": float(bulk_count),
+            "pkts_per_bulk_avg": pkts_per_bulk_avg,
+            "byts_per_bulk_avg": byts_per_bulk_avg,
+            "blk_rate_avg": blk_rate_avg,
+        }
+
+    def get_subflow_fwd_byts(self, state: Optional[FlowState], fallback_sbytes: float) -> float:
+        if state is None:
+            return fallback_sbytes
+
+        total_subflow_bytes = state.archived_subflow_fwd_bytes + state.current_subflow_fwd_bytes
+        subflow_count = max(1, state.subflow_count)
+        return total_subflow_bytes / subflow_count if total_subflow_bytes > 0 else 0.0
+
+    def get_forward_bulk_metrics(self, state: Optional[FlowState], spkts: int, sbytes: float, duration: float) -> Dict[str, float]:
+        if state is None:
+            return self._bulk_snapshot(BulkAccumulator(), spkts, sbytes, duration)
+        return self._bulk_snapshot(state.fwd_bulk, spkts, sbytes, duration)
+
+    def get_backward_bulk_metrics(self, state: Optional[FlowState], dpkts: int, dbytes: float, duration: float) -> Dict[str, float]:
+        if state is None:
+            return self._bulk_snapshot(BulkAccumulator(), dpkts, dbytes, duration)
+        return self._bulk_snapshot(state.bwd_bulk, dpkts, dbytes, duration)
 
     def cleanup_old(self, max_age: float = 300.0):
-        """Remove flows older than max_age seconds."""
         now = time.time()
-        to_remove = []
-        for key, timestamps in self.flows.items():
-            if timestamps and (now - timestamps[-1]) > max_age:
-                to_remove.append(key)
-        for key in to_remove:
-            del self.flows[key]
-            self.fwd_timestamps.pop(key, None)
-            self.idle_times.pop(key, None)
+        expired_keys = []
+        for key, state in self.flow_states.items():
+            if (now - state.last_ltime) > max_age:
+                self._flush_bulk_candidate(state.fwd_bulk)
+                self._flush_bulk_candidate(state.bwd_bulk)
+                expired_keys.append(key)
+
+        for key in expired_keys:
+            del self.flow_states[key]
 
 
 def extract_features_from_row(row: Dict, flow_tracker: FlowTracker) -> Optional[Dict]:
-    """
-    Extract 10 CSE-CICIDS-2018 features from a single argus flow record.
-    
-    Returns dict with:
-        - 10 numeric features for LSTM-AE
-        - metadata (IPs, ports, protocol, timestamp) for dashboard
-    """
     try:
-        # --- Parse raw values ---
         stime = safe_float(row.get("stime", "0"))
         ltime = safe_float(row.get("ltime", "0"))
         duration = safe_float(row.get("dur", "0"))
-        
+
         src_ip = row.get("saddr", "").strip()
         dst_ip = row.get("daddr", "").strip()
         sport = safe_int(row.get("sport", "0"))
         dport = safe_int(row.get("dport", "0"))
         proto = parse_protocol(row.get("proto", ""))
+        if proto == "man":
+            return None
 
         sbytes = safe_float(row.get("sbytes", "0"))
         dbytes = safe_float(row.get("dbytes", "0"))
         spkts = safe_int(row.get("spkts", "0"))
         dpkts = safe_int(row.get("dpkts", "0"))
-
-        sminsz = safe_float(row.get("sminsz", "0"))
-        dminsz = safe_float(row.get("dminsz", "0"))
-        smeansz = safe_float(row.get("smeansz", "0"))
-
-        sintpkt = safe_float(row.get("sintpkt", "0"))  # microseconds
-        dintpkt = safe_float(row.get("dintpkt", "0"))
-
-        flags_str = row.get("flgs", "")
-        flags = parse_tcp_flags(flags_str)
-
-        # --- Flow tracking for IAT and idle ---
-        flow_key = flow_tracker.get_flow_key(row)
-        flow_tracker.update(flow_key, stime, ltime, duration)
-
-        # ===========================================================
-        # CSE-CICIDS-2018 Feature Mapping
-        # ===========================================================
-
-        # 1. Dst Port - Destination port number
-        dst_port = float(dport)
-
-        # 2. Fwd Pkt Len Min - Minimum length of a packet in forward direction
-        #    Mapped from argus sminsz (source min packet size)
-        fwd_pkt_len_min = sminsz
-
-        # 3. Flow Pkts/s - Number of packets per second
-        #    Total packets / duration
         total_pkts = spkts + dpkts
-        flow_pkts_per_s = total_pkts / duration if duration > 0 else 0.0
 
-        # 4. Bwd Pkts/s - Backward packets per second
-        #    dpkts / duration (destination = backward direction)
-        bwd_pkts_per_s = dpkts / duration if duration > 0 else 0.0
+        sappbytes = safe_float(row.get("sappbytes", "0"))
+        dappbytes = safe_float(row.get("dappbytes", "0"))
+        swin = safe_float(row.get("swin", "0"))
+        dwin = safe_float(row.get("dwin", "0"))
 
-        # 5. Fwd IAT Min - Minimum inter-arrival time (forward direction)
-        #    From flow tracker history; fallback to argus sintpkt
-        fwd_iat_min = flow_tracker.get_fwd_iat_min(flow_key)
-        if fwd_iat_min == 0.0:
-            # Fallback: use argus source inter-packet time (microseconds -> seconds)
-            fwd_iat_min = sintpkt / 1e6 if sintpkt > 0 else 0.0
+        flow_key = flow_tracker.get_flow_key(row)
+        state = flow_tracker.update(flow_key, stime, ltime, spkts, dpkts, sbytes, dbytes, sappbytes, dappbytes, swin, proto)
 
-        # 6. ECE Flag Cnt - ECE flag count
-        ece_flag_cnt = float(flags["ece"])
+        fwd_bulk_metrics = flow_tracker.get_forward_bulk_metrics(state, spkts, sbytes, duration)
+        bwd_bulk_metrics = flow_tracker.get_backward_bulk_metrics(state, dpkts, dbytes, duration)
 
-        # 7. ACK Flag Cnt - ACK flag count
-        ack_flag_cnt = float(flags["ack"])
+        flow_iat_mean = duration / (total_pkts - 1) if total_pkts > 1 and duration > 0 else 0.0
+        fwd_header_len = max(0.0, sbytes - max(sappbytes, 0.0))
+        total_bytes = sbytes + dbytes
+        pkt_len_mean = total_bytes / total_pkts if total_pkts > 0 else 0.0
 
-        # 8. Fwd Seg Size Min - Minimum segment size (forward)
-        #    Similar to Fwd Pkt Len Min but at segment level
-        #    In CICIDS this is typically 20 (TCP header) or actual min
-        fwd_seg_size_min = sminsz if sminsz > 0 else (20.0 if proto == "tcp" else 8.0)
-
-        # 9. Fwd Act Data Pkts - Forward packets with payload > 0
-        #    Estimated: if mean size > header size, most packets have data
-        #    spkts - estimated header-only packets
-        if spkts > 0 and smeansz > 0:
-            # Estimate: packets with data = total - (packets that are just headers)
-            min_header = 20.0 if proto == "tcp" else 8.0
-            if sminsz > min_header:
-                fwd_act_data_pkts = float(spkts)  # All packets have data
-            else:
-                # Ratio of data packets based on mean vs min
-                data_ratio = min(1.0, smeansz / max(sminsz + 1, 1))
-                fwd_act_data_pkts = float(int(spkts * data_ratio))
-        else:
-            fwd_act_data_pkts = 0.0
-
-        # 10. Idle Std - Standard deviation of idle times
-        idle_std = flow_tracker.get_idle_std(flow_key)
-
-        # --- Build feature vector ---
         features = {
-            "dst_port": dst_port,
-            "fwd_pkt_len_min": fwd_pkt_len_min,
-            "flow_pkts_per_s": flow_pkts_per_s,
-            "bwd_pkts_per_s": bwd_pkts_per_s,
-            "fwd_iat_min": fwd_iat_min,
-            "ece_flag_cnt": ece_flag_cnt,
-            "ack_flag_cnt": ack_flag_cnt,
-            "fwd_seg_size_min": fwd_seg_size_min,
-            "fwd_act_data_pkts": fwd_act_data_pkts,
-            "idle_std": idle_std,
+            "dst_port_feat": float(dport),
+            "flow_duration": duration,
+            "flow_byts_per_s": (total_bytes / duration) if duration > 0 else 0.0,
+            "fwd_header_len": fwd_header_len,
+            "fwd_pkt_len_mean": (sbytes / spkts) if spkts > 0 else 0.0,
+            "fwd_pkts_per_s": (spkts / duration) if duration > 0 else 0.0,
+            "fwd_seg_size_min": safe_float(row.get("sminsz", "0")),
+            "bwd_pkts_b_avg": bwd_bulk_metrics["pkts_per_bulk_avg"],
+            "init_fwd_win_byts": max(state.initial_fwd_window if state else swin, 0.0),
+            "init_bwd_win_byts": max(min(dwin, 65535.0), 0.0),
+            "flow_iat_mean": flow_iat_mean,
+            "flow_iat_max": max(safe_float(row.get("sintpkt", "0")), safe_float(row.get("dintpkt", "0")), flow_iat_mean),
+            "bwd_iat_std": safe_float(row.get("djit", "0")),
+            "bwd_blk_rate_avg": bwd_bulk_metrics["blk_rate_avg"],
+            "bwd_byts_b_avg": bwd_bulk_metrics["byts_per_bulk_avg"],
+            "bwd_pkts_per_s": (dpkts / duration) if duration > 0 else 0.0,
+            "pkt_len_mean": pkt_len_mean,
+            "subflow_fwd_byts": flow_tracker.get_subflow_fwd_byts(state, sbytes),
+            "fwd_byts_b_avg": fwd_bulk_metrics["byts_per_bulk_avg"],
         }
 
-        # --- Metadata for dashboard ---
         metadata = {
             "timestamp": stime,
             "src_ip": src_ip,
@@ -298,30 +454,23 @@ def extract_features_from_row(row: Dict, flow_tracker: FlowTracker) -> Optional[
             "bwd_bytes": dbytes,
             "fwd_packets": spkts,
             "bwd_packets": dpkts,
-            "flags": flags_str.strip(),
             "state": row.get("state", "").strip(),
+            "feature_set_version": FEATURE_SET_VERSION,
         }
 
         return {"features": features, "metadata": metadata}
-
     except Exception as e:
-        logger.warning(f"Feature extraction error: {e}")
+        logger.warning("Feature extraction error: %s", e)
         return None
 
 
 def process_csv_stream(input_stream, callback=None):
-    """
-    Process streaming CSV from argus (ra output).
-    Yields feature dicts for each flow record.
-    """
     flow_tracker = FlowTracker()
     record_count = 0
-    cleanup_interval = 100  # Cleanup every N records
+    cleanup_interval = 100
 
     reader = csv.DictReader(input_stream, fieldnames=ARGUS_FIELDS)
-
     for row in reader:
-        # Skip empty or header rows
         if not row or not row.get("stime"):
             continue
         if row.get("stime", "").strip().startswith("StartTime"):
@@ -335,13 +484,11 @@ def process_csv_stream(input_stream, callback=None):
             else:
                 yield result
 
-            # Periodic cleanup of old flows
             if record_count % cleanup_interval == 0:
                 flow_tracker.cleanup_old()
 
 
 def process_csv_line(line: str, flow_tracker: FlowTracker) -> Optional[Dict]:
-    """Process a single CSV line. Used by pipeline.py for real-time processing."""
     if not line or not line.strip():
         return None
 
@@ -355,21 +502,12 @@ def process_csv_line(line: str, flow_tracker: FlowTracker) -> Optional[Dict]:
     return None
 
 
-def get_feature_vector(features_dict: Dict) -> List[float]:
-    """Convert features dict to ordered numpy-compatible list."""
-    feature_order = [
-        "dst_port", "fwd_pkt_len_min", "flow_pkts_per_s", "bwd_pkts_per_s",
-        "fwd_iat_min", "ece_flag_cnt", "ack_flag_cnt", "fwd_seg_size_min",
-        "fwd_act_data_pkts", "idle_std"
-    ]
-    return [features_dict[f] for f in feature_order]
+def get_feature_vector(features_dict: Dict, selected_features=None) -> List[float]:
+    return ordered_feature_values(features_dict, selected_features)
 
 
-# =================================================================
-# CLI Mode - Read from file/pipe directly
-# =================================================================
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Extract CSE-CICIDS-2018 features from Argus flows")
+    parser = argparse.ArgumentParser(description="Extract dual-stage live features from Argus flows")
     parser.add_argument("--input", "-i", default="-", help="Input CSV file or pipe (default: stdin)")
     parser.add_argument("--output", "-o", default="-", help="Output file (default: stdout)")
     parser.add_argument("--config", "-c", default="config.yaml", help="Config file path")
@@ -378,29 +516,24 @@ if __name__ == "__main__":
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 
-    # Open input
-    if args.input == "-":
-        input_stream = sys.stdin
-    else:
-        input_stream = open(args.input, "r")
-
-    # Open output
-    if args.output == "-":
-        output_stream = sys.stdout
-    else:
-        output_stream = open(args.output, "w")
+    input_stream = sys.stdin if args.input == "-" else open(args.input, "r")
+    output_stream = sys.stdout if args.output == "-" else open(args.output, "w")
 
     try:
-        feature_names = [
-            "dst_port", "fwd_pkt_len_min", "flow_pkts_per_s", "bwd_pkts_per_s",
-            "fwd_iat_min", "ece_flag_cnt", "ack_flag_cnt", "fwd_seg_size_min",
-            "fwd_act_data_pkts", "idle_std"
+        meta_fields = [
+            "timestamp",
+            "src_ip",
+            "dst_ip",
+            "src_port",
+            "protocol",
+            "duration",
+            "total_bytes",
+            "total_packets",
+            "feature_set_version",
         ]
 
         if args.format == "csv":
-            # Print CSV header
-            meta_fields = ["timestamp", "src_ip", "dst_ip", "src_port", "protocol", "duration", "total_bytes", "total_packets"]
-            header = ",".join(meta_fields + feature_names)
+            header = ",".join(meta_fields + FEATURE_KEYS)
             output_stream.write(header + "\n")
             output_stream.flush()
 
@@ -416,24 +549,22 @@ if __name__ == "__main__":
                     metadata["dst_ip"],
                     str(metadata["src_port"]),
                     metadata["protocol"],
-                    f"{metadata['duration']:.4f}",
+                    f"{metadata['duration']:.6f}",
                     f"{metadata['total_bytes']:.0f}",
                     str(metadata["total_packets"]),
+                    metadata["feature_set_version"],
                 ]
-                feat_vals = [f"{features[f]:.6f}" for f in feature_names]
-                line = ",".join(meta_vals + feat_vals)
-                output_stream.write(line + "\n")
+                feat_vals = [f"{features[key]:.6f}" for key in FEATURE_KEYS]
+                output_stream.write(",".join(meta_vals + feat_vals) + "\n")
             else:
                 output_stream.write(json.dumps({**metadata, **features}) + "\n")
 
             output_stream.flush()
             count += 1
-
             if count % 100 == 0:
-                logger.info(f"Processed {count} flows")
-
+                logger.info("Processed %s flows", count)
     except KeyboardInterrupt:
-        logger.info(f"Stopped. Total flows processed: {count}")
+        logger.info("Stopped. Total flows processed: %s", count)
     finally:
         if args.input != "-":
             input_stream.close()

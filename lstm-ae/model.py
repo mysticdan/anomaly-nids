@@ -1,335 +1,278 @@
-"""
-LSTM Autoencoder Model for Network Traffic Anomaly Detection
+"""Dual-stage LSTM autoencoder runtime for live anomaly detection."""
 
-Architecture:
-  - Encoder: Multi-layer LSTM compresses traffic sequence to latent vector
-  - Decoder: Reconstructs sequence from latent representation
-  - Anomaly Detection: High reconstruction error = anomaly
-
-Input: 10 features mirip CSE-CICIDS-2018:
-  1. Dst Port, 2. Fwd Pkt Len Min, 3. Flow Pkts/s, 4. Bwd Pkts/s,
-  5. Fwd IAT Min, 6. ECE Flag Cnt, 7. ACK Flag Cnt, 8. Fwd Seg Size Min,
-  9. Fwd Act Data Pkts, 10. Idle Std
-"""
-
-import os
 import json
 import logging
+import os
 import pickle
-from typing import Optional, Tuple, Dict, List
+import sys
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
 from sklearn.preprocessing import StandardScaler
 
+ROOT_DIR = os.path.dirname(os.path.dirname(__file__))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
+from feature_schema import MODEL_FEATURE_NAMES, normalize_feature_names
+
 logger = logging.getLogger("lstm_ae")
 
 
-# =================================================================
-# Model Architecture
-# =================================================================
-
-class LSTMEncoder(nn.Module):
-    """Encoder: Compress sequence menjadi latent vector."""
-
-    def __init__(self, input_dim, hidden_dim, num_layers, dropout=0.0):
-        super().__init__()
-        self.lstm = nn.LSTM(
-            input_size=input_dim,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
-            batch_first=True,
-            dropout=dropout if num_layers > 1 else 0.0,
-        )
-
-    def forward(self, x):
-        # x: (batch, seq_len, input_dim)
-        _, (hidden, cell) = self.lstm(x)
-        # hidden: (num_layers, batch, hidden_dim)
-        return hidden, cell
-
-
-class LSTMDecoder(nn.Module):
-    """Decoder: Reconstruct sequence dari latent vector."""
-
-    def __init__(self, input_dim, hidden_dim, output_dim, num_layers, dropout=0.0):
-        super().__init__()
-        self.hidden_dim = hidden_dim
-        self.output_dim = output_dim
-        self.lstm = nn.LSTM(
-            input_size=input_dim,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
-            batch_first=True,
-            dropout=dropout if num_layers > 1 else 0.0,
-        )
-        self.output_layer = nn.Linear(hidden_dim, output_dim)
-
-    def forward(self, x, hidden, cell):
-        output, _ = self.lstm(x, (hidden, cell))
-        reconstruction = self.output_layer(output)
-        return reconstruction
-
-
 class LSTMAutoencoder(nn.Module):
-    """LSTM Autoencoder: Encoder + Decoder."""
-
-    def __init__(self, input_dim, hidden_dim, latent_dim, num_layers, dropout=0.0):
+    def __init__(self, num_features: int, time_steps: int, hidden_dim: int = 64, dropout: float = 0.2):
         super().__init__()
-        self.input_dim = input_dim
-        self.latent_dim = latent_dim
-        self.encoder = LSTMEncoder(input_dim, hidden_dim, num_layers, dropout)
-        self.decoder = LSTMDecoder(latent_dim, hidden_dim, input_dim, num_layers, dropout)
-        self.hidden_to_latent = nn.Linear(hidden_dim, latent_dim)
+        self.time_steps = time_steps
+        self.encoder_lstm = nn.LSTM(num_features, hidden_dim, batch_first=True)
+        self.encoder_dropout = nn.Dropout(dropout)
+        self.decoder_lstm = nn.LSTM(hidden_dim, hidden_dim, batch_first=True)
+        self.decoder_dropout = nn.Dropout(dropout)
+        self.output_layer = nn.Linear(hidden_dim, num_features)
 
-    def forward(self, x):
-        batch_size, seq_len, _ = x.shape
-        hidden, cell = self.encoder(x)
-        latent = self.hidden_to_latent(hidden[-1])  # (batch, latent_dim)
-        decoder_input = latent.unsqueeze(1).repeat(1, seq_len, 1)
-        reconstruction = self.decoder(decoder_input, hidden, cell)
-        return reconstruction, latent
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        _, (hidden, _) = self.encoder_lstm(x)
+        latent = self.encoder_dropout(hidden[-1])
+        repeated = latent.unsqueeze(1).repeat(1, self.time_steps, 1)
+        decoded, _ = self.decoder_lstm(repeated)
+        return self.output_layer(self.decoder_dropout(decoded))
 
 
-# =================================================================
-# LSTM-AE Service
-# =================================================================
+class DualStageAutoencoder(nn.Module):
+    def __init__(self, num_features: int, time_steps: int, hidden_dim: int = 64, dropout: float = 0.2):
+        super().__init__()
+        self.stage1 = LSTMAutoencoder(num_features, time_steps, hidden_dim, dropout)
+        self.stage2 = LSTMAutoencoder(num_features, time_steps, hidden_dim, dropout)
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        recon1 = self.stage1(x)
+        residual = torch.abs(x - recon1)
+        return recon1, self.stage2(residual)
+
+
+def dual_stage_errors(model: DualStageAutoencoder, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    recon1, recon_residual = model(x)
+    residual = torch.abs(x - recon1)
+    combined = residual + torch.abs(residual - recon_residual)
+    return combined.mean(dim=(1, 2)), combined.mean(dim=1)
+
 
 class LSTMAEService:
-    """
-    LSTM Autoencoder Service for anomaly detection.
-    
-    Handles:
-      - Model loading/saving
-      - Feature scaling (StandardScaler)
-      - Sequence windowing
-      - Anomaly scoring via reconstruction error
-      - Threshold management
-    """
-
     def __init__(self, config: Dict):
         self.config = config
         model_cfg = config.get("model", {})
-
-        self.input_dim = model_cfg.get("input_dim", 10)
-        self.hidden_dim = model_cfg.get("hidden_dim", 64)
-        self.latent_dim = model_cfg.get("latent_dim", 32)
-        self.num_layers = model_cfg.get("num_layers", 2)
-        self.dropout = model_cfg.get("dropout", 0.1)
-        self.device = torch.device(model_cfg.get("device", "cpu"))
-        self.model_path = model_cfg.get("model_path", "model-lstm-ae/best_lstm_autoencoder.pth")
-        self.scaler_path = model_cfg.get("scaler_path", "model-lstm-ae/scaler.pkl")
-        self.threshold_path = model_cfg.get("threshold_path", "model-lstm-ae/threshold.json")
-
-        self.seq_len = config.get("features", {}).get("sequence_length", 50)
-
         detection_cfg = config.get("detection", {})
-        self.default_threshold = detection_cfg.get("default_threshold", 0.5)
+
+        self.device = torch.device(model_cfg.get("device", "cpu"))
+        self.model_path = model_cfg.get("model_path")
+        self.scaler_path = model_cfg.get("scaler_path")
+        self.metadata_path = model_cfg.get("metadata_path")
+        self.dropout = model_cfg.get("dropout", 0.2)
         self.score_multiplier = detection_cfg.get("score_multiplier", 100)
 
-        # Initialize model
-        self.model = LSTMAutoencoder(
-            self.input_dim, self.hidden_dim, self.latent_dim,
-            self.num_layers, self.dropout
-        ).to(self.device)
+        self.metadata = self._load_metadata()
+        self.selected_features = normalize_feature_names(self.metadata.get("selected_features", MODEL_FEATURE_NAMES))
+        self.seq_len = int(self.metadata.get("time_steps", model_cfg.get("sequence_length", 10)))
+        self.hidden_dim = int(self.metadata.get("hidden_dim", model_cfg.get("hidden_dim", 64)))
+        self.input_dim = len(self.selected_features)
+        self.threshold = float(self.metadata.get("threshold", detection_cfg.get("default_threshold", 1.0)))
+        self.threshold_percentile = float(self.metadata.get("threshold_percentile", detection_cfg.get("threshold_percentile", 95)))
 
-        # Scaler for feature normalization
+        self.model = DualStageAutoencoder(self.input_dim, self.seq_len, self.hidden_dim, self.dropout).to(self.device)
         self.scaler = StandardScaler()
         self.scaler_fitted = False
-
-        # Anomaly threshold
-        self.threshold = self.default_threshold
-
-        # Sequence buffer for windowing
         self.feature_buffer: List[List[float]] = []
 
-        # Load saved model and scaler if available
         self._load_model()
         self._load_scaler()
-        self._load_threshold()
+
+    def _load_metadata(self) -> Dict:
+        if not self.metadata_path or not os.path.exists(self.metadata_path):
+            raise FileNotFoundError(f"dual-stage metadata not found: {self.metadata_path}")
+        with open(self.metadata_path, "r") as f:
+            metadata = json.load(f)
+        logger.info(
+            "Loaded dual-stage metadata: %s features, seq_len=%s, threshold=%.6f",
+            len(metadata.get("selected_features", [])),
+            metadata.get("time_steps", 10),
+            float(metadata.get("threshold", 0.0)),
+        )
+        return metadata
 
     def _load_model(self):
-        """Load trained model weights."""
-        if os.path.exists(self.model_path):
-            try:
-                state_dict = torch.load(self.model_path, map_location=self.device, weights_only=True)
-                self.model.load_state_dict(state_dict)
-                self.model.eval()
-                logger.info(f"Model loaded from {self.model_path}")
-            except Exception as e:
-                logger.warning(f"Could not load model: {e}. Using random weights.")
-                self.model.eval()
-        else:
-            logger.warning(f"No model found at {self.model_path}. Using random weights.")
-            self.model.eval()
+        if not self.model_path or not os.path.exists(self.model_path):
+            raise FileNotFoundError(f"dual-stage model artifact not found: {self.model_path}")
+        payload = torch.load(self.model_path, map_location=self.device)
+        state_dict = payload.get("model_state_dict", payload) if isinstance(payload, dict) else payload
+        self.model.load_state_dict(state_dict)
+        self.model.eval()
+        logger.info("Loaded dual-stage model from %s", self.model_path)
 
     def _load_scaler(self):
-        """Load fitted StandardScaler."""
-        if os.path.exists(self.scaler_path):
-            try:
-                with open(self.scaler_path, "rb") as f:
-                    self.scaler = pickle.load(f)
-                self.scaler_fitted = True
-                logger.info(f"Scaler loaded from {self.scaler_path}")
-            except Exception as e:
-                logger.warning(f"Could not load scaler: {e}. Will fit on incoming data.")
-        else:
-            logger.info("No saved scaler. Will fit on incoming data.")
-
-    def _load_threshold(self):
-        """Load anomaly threshold."""
-        if os.path.exists(self.threshold_path):
-            try:
-                with open(self.threshold_path, "r") as f:
-                    data = json.load(f)
-                self.threshold = data.get("threshold", self.default_threshold)
-                logger.info(f"Threshold loaded: {self.threshold:.6f}")
-            except Exception as e:
-                logger.warning(f"Could not load threshold: {e}. Using default: {self.default_threshold}")
-        else:
-            logger.info(f"No saved threshold. Using default: {self.default_threshold}")
+        if not self.scaler_path or not os.path.exists(self.scaler_path):
+            raise FileNotFoundError(f"dual-stage scaler not found: {self.scaler_path}")
+        with open(self.scaler_path, "rb") as f:
+            self.scaler = pickle.load(f)
+        self.scaler_fitted = hasattr(self.scaler, "mean_")
+        if not self.scaler_fitted:
+            raise RuntimeError("dual-stage scaler is not fitted")
+        logger.info("Loaded dual-stage scaler from %s", self.scaler_path)
 
     def save_model(self):
-        """Save current model state."""
-        os.makedirs(os.path.dirname(self.model_path), exist_ok=True)
         torch.save(self.model.state_dict(), self.model_path)
-        logger.info(f"Model saved to {self.model_path}")
 
     def save_scaler(self):
-        """Save fitted scaler."""
-        os.makedirs(os.path.dirname(self.scaler_path), exist_ok=True)
         with open(self.scaler_path, "wb") as f:
             pickle.dump(self.scaler, f)
-        logger.info(f"Scaler saved to {self.scaler_path}")
 
-    def save_threshold(self, threshold: float):
-        """Save anomaly threshold."""
-        self.threshold = threshold
-        os.makedirs(os.path.dirname(self.threshold_path), exist_ok=True)
-        with open(self.threshold_path, "w") as f:
-            json.dump({"threshold": threshold}, f)
-        logger.info(f"Threshold saved: {threshold:.6f}")
+    def save_metadata(self):
+        metadata = dict(self.metadata)
+        metadata.update(
+            {
+                "selected_features": self.selected_features,
+                "time_steps": self.seq_len,
+                "hidden_dim": self.hidden_dim,
+                "threshold": self.threshold,
+                "threshold_percentile": self.threshold_percentile,
+            }
+        )
+        with open(self.metadata_path, "w") as f:
+            json.dump(metadata, f, indent=2)
+        self.metadata = metadata
+
+    def adapt_scaler(self, features: np.ndarray):
+        array = np.asarray(features, dtype=np.float32)
+        if array.ndim != 2:
+            raise ValueError(f"Expected 2D feature matrix, got shape {array.shape}")
+        self.scaler.partial_fit(array)
+        self.save_scaler()
+        logger.info("Scaler adapted with %s feature rows", len(array))
+
+    def update_threshold(self, threshold: float, threshold_percentile: Optional[float] = None):
+        self.threshold = float(threshold)
+        if threshold_percentile is not None:
+            self.threshold_percentile = float(threshold_percentile)
+        self.save_metadata()
+        self.save_model()
+        logger.info("Threshold updated to %.6f (percentile=%s)", self.threshold, self.threshold_percentile)
+
+    def recalibrate_threshold(self, data: np.ndarray, threshold_percentile: Optional[float] = None) -> float:
+        if len(data) == 0:
+            raise ValueError("Cannot recalibrate threshold with empty data")
+        percentile = float(self.threshold_percentile if threshold_percentile is None else threshold_percentile)
+        new_threshold = float(np.percentile(self.compute_reconstruction_errors(data), percentile))
+        self.update_threshold(new_threshold, percentile)
+        return new_threshold
 
     def scale_features(self, features: np.ndarray) -> np.ndarray:
-        """Scale features using StandardScaler."""
         if not self.scaler_fitted:
-            if len(features.shape) == 1:
-                features = features.reshape(1, -1)
-            self.scaler.partial_fit(features)
-            # After enough samples, mark as fitted
-            if hasattr(self.scaler, 'n_samples_seen_') and self.scaler.n_samples_seen_ > 100:
-                self.scaler_fitted = True
-                self.save_scaler()
-            return self.scaler.transform(features)
-        return self.scaler.transform(features.reshape(1, -1) if len(features.shape) == 1 else features)
+            raise RuntimeError("dual-stage scaler is not loaded")
+        array = np.asarray(features, dtype=np.float32)
+        if array.ndim == 1:
+            array = array.reshape(1, -1)
+        return self.scaler.transform(array).astype(np.float32)
+
+    def scale_sequence(self, sequence: np.ndarray) -> np.ndarray:
+        sequence = np.asarray(sequence, dtype=np.float32)
+        if sequence.ndim != 2:
+            raise ValueError(f"Expected 2D sequence, got shape {sequence.shape}")
+        scaled = self.scale_features(sequence.reshape(-1, self.input_dim))
+        return scaled.reshape(sequence.shape).astype(np.float32)
+
+    def scale_sequence_batch(self, data: np.ndarray) -> np.ndarray:
+        data = np.asarray(data, dtype=np.float32)
+        if data.ndim != 3:
+            raise ValueError(f"Expected 3D batch of sequences, got shape {data.shape}")
+        scaled = self.scale_features(data.reshape(-1, self.input_dim))
+        return scaled.reshape(data.shape).astype(np.float32)
 
     def add_to_buffer(self, feature_vector: List[float]) -> Optional[np.ndarray]:
-        """
-        Add feature vector to buffer. Returns sequence when buffer is full.
-        
-        Returns:
-            Scaled sequence of shape (seq_len, input_dim) or None
-        """
         self.feature_buffer.append(feature_vector)
-
-        if len(self.feature_buffer) >= self.seq_len:
-            # Extract sequence window
-            sequence = np.array(self.feature_buffer[-self.seq_len:], dtype=np.float32)
-            # Scale
-            scaled = self.scale_features(sequence)
-            return scaled.astype(np.float32)
-        return None
+        if len(self.feature_buffer) > self.seq_len:
+            self.feature_buffer = self.feature_buffer[-self.seq_len :]
+        if len(self.feature_buffer) < self.seq_len:
+            return None
+        return self.scale_sequence(np.array(self.feature_buffer, dtype=np.float32))
 
     def get_feature_names(self) -> List[str]:
-        """Return the names of the 10 features."""
-        return [
-            "Dst Port", "Fwd Pkt Len Min", "Flow Pkts/s", "Bwd Pkts/s",
-            "Fwd IAT Min", "ECE Flag Cnt", "ACK Flag Cnt", "Fwd Seg Size Min",
-            "Fwd Act Data Pkts", "Idle Std"
-        ]
+        return list(self.selected_features)
 
     @torch.no_grad()
     def predict(self, sequence: np.ndarray) -> Tuple[float, float, np.ndarray]:
-        """
-        Run anomaly detection on a sequence.
-        Returns: (reconstruction_error, anomaly_score, per_feature_errors)
-        """
         self.model.eval()
-        x = torch.FloatTensor(sequence).unsqueeze(0).to(self.device)
-        reconstruction, latent = self.model(x)
-        
-        # Calculate squared error per element: (batch, seq_len, input_dim)
-        sq_errors = (x - reconstruction) ** 2
-        # Mean over sequence length to get error per feature: (batch, input_dim)
-        feature_errors = sq_errors.mean(dim=1).squeeze(0).cpu().numpy()
-        # Total MSE: mean of all elements
-        mse = sq_errors.mean().item()
+        x = torch.as_tensor(sequence, dtype=torch.float32, device=self.device).unsqueeze(0)
+        errors, feature_errors = dual_stage_errors(self.model, x)
+        mae = float(errors.item())
+        score = min(100.0, (mae / self.threshold) * self.score_multiplier) if self.threshold > 0 else min(100.0, mae * self.score_multiplier)
+        return mae, score, feature_errors.squeeze(0).cpu().numpy()
 
-        if self.threshold > 0:
-            score = min(100.0, (mse / self.threshold) * self.score_multiplier)
-        else:
-            score = min(100.0, mse * self.score_multiplier)
-
-        return mse, score, feature_errors
+    def is_anomaly(self, reconstruction_error: float) -> bool:
+        return reconstruction_error > self.threshold
 
     def train_incremental(self, data: np.ndarray, epochs: int = 1, lr: float = 1e-4):
-        """
-        Incremental learning on normal traffic data.
-        
-        Args:
-            data: (num_samples, seq_len, input_dim) normal sequences
-            epochs: Number of training epochs
-            lr: Learning rate
-        """
         if len(data) == 0:
             return 0.0
-
-        self.model.train()
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
-        criterion = nn.MSELoss()
-        
-        x_train = torch.FloatTensor(data).to(self.device)
-        
+        x_train = torch.as_tensor(data, dtype=torch.float32, device=self.device)
+        criterion = nn.L1Loss()
         total_loss = 0.0
-        for epoch in range(epochs):
+
+        self.model.stage1.train()
+        optimizer = torch.optim.Adam(self.model.stage1.parameters(), lr=lr)
+        for _ in range(epochs):
             optimizer.zero_grad()
-            reconstruction, _ = self.model(x_train)
-            loss = criterion(reconstruction, x_train)
+            loss = criterion(self.model.stage1(x_train), x_train)
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
-        
+
+        for param in self.model.stage1.parameters():
+            param.requires_grad = False
+        self.model.stage1.eval()
+        self.model.stage2.train()
+        optimizer = torch.optim.Adam(self.model.stage2.parameters(), lr=lr)
+        for _ in range(epochs):
+            with torch.no_grad():
+                residual = torch.abs(x_train - self.model.stage1(x_train))
+            optimizer.zero_grad()
+            loss = criterion(self.model.stage2(residual), residual)
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+        for param in self.model.stage1.parameters():
+            param.requires_grad = True
+
         self.model.eval()
         self.save_model()
-        logger.info(f"Incremental training complete. Avg loss: {total_loss/epochs:.6f}")
-        return total_loss / epochs
-
-    def is_anomaly(self, mse: float) -> bool:
-        """Check if reconstruction error exceeds threshold."""
-        return mse > self.threshold
+        avg_loss = total_loss / max(1, epochs * 2)
+        logger.info("Dual-stage incremental training complete. Avg MAE loss: %.6f", avg_loss)
+        return avg_loss
 
     @torch.no_grad()
     def compute_reconstruction_errors(self, data: np.ndarray) -> np.ndarray:
-        """
-        Compute reconstruction errors for batch of sequences.
-        
-        Args:
-            data: (num_samples, seq_len, input_dim)
-            
-        Returns:
-            Array of MSE values per sample
-        """
         self.model.eval()
-        x = torch.FloatTensor(data).to(self.device)
-        reconstruction, _ = self.model(x)
-        mse = ((x - reconstruction) ** 2).mean(dim=(1, 2))
-        return mse.cpu().numpy()
+        x = torch.as_tensor(data, dtype=torch.float32, device=self.device)
+        errors, _ = dual_stage_errors(self.model, x)
+        return errors.cpu().numpy()
 
-    def get_model(self) -> LSTMAutoencoder:
-        """Get the underlying PyTorch model."""
+    def get_model(self) -> DualStageAutoencoder:
         return self.model
 
     def get_scaler(self) -> StandardScaler:
-        """Get the feature scaler."""
         return self.scaler
+
+
+def _self_check():
+    model = DualStageAutoencoder(10, 10)
+    x = torch.randn(2, 10, 10)
+    recon1, recon2 = model(x)
+    errors, feature_errors = dual_stage_errors(model, x)
+    assert recon1.shape == x.shape
+    assert recon2.shape == x.shape
+    assert errors.shape == (2,)
+    assert feature_errors.shape == (2, 10)
+
+
+if __name__ == "__main__":
+    _self_check()
+    print("dual-stage self-check ok")

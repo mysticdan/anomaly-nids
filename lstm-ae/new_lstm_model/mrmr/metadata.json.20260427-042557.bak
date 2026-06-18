@@ -1,0 +1,390 @@
+{
+  "method_name": "mRMR",
+  "selected_features": [
+    "Dst Port",
+    "Fwd Header Len",
+    "Bwd Pkts/b Avg",
+    "Init Fwd Win Byts",
+    "Flow IAT Mean",
+    "Bwd Blk Rate Avg",
+    "Bwd Byts/b Avg",
+    "Bwd Pkts/s",
+    "Subflow Fwd Byts",
+    "Fwd Byts/b Avg"
+  ],
+  "pruned_feature_columns": [
+    "Dst Port",
+    "Protocol",
+    "Flow Duration",
+    "Fwd Pkt Len Max",
+    "Fwd Pkt Len Mean",
+    "Bwd Pkt Len Min",
+    "Flow Byts/s",
+    "Flow IAT Mean",
+    "Flow IAT Std",
+    "Flow IAT Max",
+    "Bwd IAT Mean",
+    "Bwd IAT Std",
+    "Bwd IAT Min",
+    "Fwd PSH Flags",
+    "Bwd PSH Flags",
+    "Fwd URG Flags",
+    "Bwd URG Flags",
+    "Fwd Header Len",
+    "Fwd Pkts/s",
+    "Bwd Pkts/s",
+    "Pkt Len Min",
+    "Pkt Len Mean",
+    "FIN Flag Cnt",
+    "RST Flag Cnt",
+    "PSH Flag Cnt",
+    "ACK Flag Cnt",
+    "URG Flag Cnt",
+    "Down/Up Ratio",
+    "Fwd Byts/b Avg",
+    "Fwd Pkts/b Avg",
+    "Fwd Blk Rate Avg",
+    "Bwd Byts/b Avg",
+    "Bwd Pkts/b Avg",
+    "Bwd Blk Rate Avg",
+    "Subflow Fwd Byts",
+    "Init Fwd Win Byts",
+    "Init Bwd Win Byts",
+    "Fwd Act Data Pkts",
+    "Fwd Seg Size Min",
+    "Active Mean",
+    "Active Std",
+    "Idle Std"
+  ],
+  "dropped_correlated_features": [
+    {
+      "kept_feature": "Flow Duration",
+      "dropped_feature": "Fwd IAT Tot",
+      "correlation": 0.9951133537153466,
+      "kept_mi": 0.07949142315267266,
+      "dropped_mi": 0.043813063307487576,
+      "kept_variance": 870254527905792.0,
+      "dropped_variance": 865669717426176.0
+    },
+    {
+      "kept_feature": "Flow Duration",
+      "dropped_feature": "Bwd IAT Tot",
+      "correlation": 0.9013678459129879,
+      "kept_mi": 0.07949142315267266,
+      "dropped_mi": 0.022455108113444755,
+      "kept_variance": 870254527905792.0,
+      "dropped_variance": 704504492195840.0
+    },
+    {
+      "kept_feature": "Tot Fwd Pkts",
+      "dropped_feature": "Tot Bwd Pkts",
+      "correlation": 0.9864447656972447,
+      "kept_mi": 0.01607279520426519,
+      "dropped_mi": 0.00892794352795856,
+      "kept_variance": 3147.782958984375,
+      "dropped_variance": 14184.3583984375
+    },
+    {
+      "kept_feature": "TotLen Bwd Pkts",
+      "dropped_feature": "Tot Fwd Pkts",
+      "correlation": 0.9910198398717867,
+      "kept_mi": 0.032971469260245856,
+      "dropped_mi": 0.01607279520426519,
+      "kept_variance": 28935434240.0,
+      "dropped_variance": 3147.782958984375
+    },
+    {
+      "kept_feature": "Subflow Fwd Byts",
+      "dropped_feature": "TotLen Fwd Pkts",
+      "correlation": 1.0,
+      "kept_mi": 0.04104311956775719,
+      "dropped_mi": 0.0362465017832907,
+      "kept_variance": 6801027.0,
+      "dropped_variance": 6801027.0
+    },
+    {
+      "kept_feature": "Fwd Header Len",
+      "dropped_feature": "TotLen Bwd Pkts",
+      "correlation": 0.9925745576561492,
+      "kept_mi": 0.07670683585684746,
+      "dropped_mi": 0.032971469260245856,
+      "kept_variance": 1255734.875,
+      "dropped_variance": 28935434240.0
+    },
+    {
+      "kept_feature": "Fwd Pkt Len Max",
+      "dropped_feature": "Fwd Pkt Len Std",
+      "correlation": 0.9744291303956337,
+      "kept_mi": 0.03892858866003346,
+      "dropped_mi": 0.015054838211851607,
+      "kept_variance": 68163.046875,
+      "dropped_variance": 7838.04443359375
+    },
+    {
+      "kept_feature": "Pkt Len Min",
+      "dropped_feature": "Fwd Pkt Len Min",
+      "correlation": 0.9464523169717122,
+      "kept_mi": 0.005362560492687463,
+      "dropped_mi": 0.005333779401358818,
+      "kept_variance": 571.4641723632812,
+      "dropped_variance": 637.2872924804688
+    },
+    {
+      "kept_feature": "Fwd Pkt Len Mean",
+      "dropped_feature": "Fwd Seg Size Avg",
+      "correlation": 1.0,
+      "kept_mi": 0.04005897800933167,
+      "dropped_mi": 0.03553306426425529,
+      "kept_variance": 2743.3583984375,
+      "dropped_variance": 2743.3583984375
+    },
+    {
+      "kept_feature": "Bwd Pkt Len Max",
+      "dropped_feature": "Bwd Pkt Len Std",
+      "correlation": 0.9794773829092739,
+      "kept_mi": 0.03312122618069546,
+      "dropped_mi": 0.02399694733519797,
+      "kept_variance": 258315.84375,
+      "dropped_variance": 44020.74609375
+    },
+    {
+      "kept_feature": "Pkt Len Max",
+      "dropped_feature": "Bwd Pkt Len Max",
+      "correlation": 0.9920452106104977,
+      "kept_mi": 0.0371760367601619,
+      "dropped_mi": 0.03312122618069546,
+      "kept_variance": 259942.859375,
+      "dropped_variance": 258315.84375
+    },
+    {
+      "kept_feature": "Pkt Len Mean",
+      "dropped_feature": "Bwd Pkt Len Mean",
+      "correlation": 0.9568716194072628,
+      "kept_mi": 0.0422903509725201,
+      "dropped_mi": 0.03249492482189331,
+      "kept_variance": 10115.7255859375,
+      "dropped_variance": 27737.537109375
+    },
+    {
+      "kept_feature": "Fwd Pkts/s",
+      "dropped_feature": "Flow Pkts/s",
+      "correlation": 0.9372395715798079,
+      "kept_mi": 0.07560503139523256,
+      "dropped_mi": 0.07507211608810205,
+      "kept_variance": 68864049152.0,
+      "dropped_variance": 150756655104.0
+    },
+    {
+      "kept_feature": "Flow IAT Mean",
+      "dropped_feature": "Flow IAT Min",
+      "correlation": 0.9595046670272629,
+      "kept_mi": 0.07748492554497255,
+      "dropped_mi": 0.03903330712988473,
+      "kept_variance": 26045119987712.0,
+      "dropped_variance": 24251866284032.0
+    },
+    {
+      "kept_feature": "Flow IAT Mean",
+      "dropped_feature": "Fwd IAT Mean",
+      "correlation": 0.9652288554826733,
+      "kept_mi": 0.07748492554497255,
+      "dropped_mi": 0.03870160087471408,
+      "kept_variance": 26045119987712.0,
+      "dropped_variance": 30829193461760.0
+    },
+    {
+      "kept_feature": "Flow IAT Mean",
+      "dropped_feature": "Fwd IAT Min",
+      "correlation": 0.948559472830265,
+      "kept_mi": 0.07748492554497255,
+      "dropped_mi": 0.028954981207787167,
+      "kept_variance": 26045119987712.0,
+      "dropped_variance": 26271606112256.0
+    },
+    {
+      "kept_feature": "Flow IAT Std",
+      "dropped_feature": "Fwd IAT Std",
+      "correlation": 0.9288583889431969,
+      "kept_mi": 0.02399343814914423,
+      "dropped_mi": 0.018782304149929763,
+      "kept_variance": 10540276514816.0,
+      "dropped_variance": 16341046132736.0
+    },
+    {
+      "kept_feature": "Flow IAT Max",
+      "dropped_feature": "Fwd IAT Max",
+      "correlation": 0.9794506770413912,
+      "kept_mi": 0.07122864370504667,
+      "dropped_mi": 0.03885567214903318,
+      "kept_variance": 144488152432640.0,
+      "dropped_variance": 140651698061312.0
+    },
+    {
+      "kept_feature": "Flow IAT Max",
+      "dropped_feature": "Idle Mean",
+      "correlation": 0.9879895828098265,
+      "kept_mi": 0.07122864370504667,
+      "dropped_mi": 0.0037860447365609673,
+      "kept_variance": 144488152432640.0,
+      "dropped_variance": 135677446455296.0
+    },
+    {
+      "kept_feature": "Flow IAT Max",
+      "dropped_feature": "Idle Max",
+      "correlation": 0.995342730064039,
+      "kept_mi": 0.07122864370504667,
+      "dropped_mi": 0.004204360248917238,
+      "kept_variance": 144488152432640.0,
+      "dropped_variance": 144661763063808.0
+    },
+    {
+      "kept_feature": "Flow IAT Max",
+      "dropped_feature": "Idle Min",
+      "correlation": 0.968285860865918,
+      "kept_mi": 0.07122864370504667,
+      "dropped_mi": 0.0009744702381653259,
+      "kept_variance": 144488152432640.0,
+      "dropped_variance": 130724577411072.0
+    },
+    {
+      "kept_feature": "Bwd IAT Std",
+      "dropped_feature": "Bwd IAT Max",
+      "correlation": 0.9067734650220858,
+      "kept_mi": 0.022200398604129035,
+      "dropped_mi": 0.021342023412167288,
+      "kept_variance": 12250158989312.0,
+      "dropped_variance": 114021030166528.0
+    },
+    {
+      "kept_feature": "Fwd PSH Flags",
+      "dropped_feature": "SYN Flag Cnt",
+      "correlation": 1.0,
+      "kept_mi": 0.0030652080499511403,
+      "dropped_mi": 0.0,
+      "kept_variance": 0.0458553172647953,
+      "dropped_variance": 0.0458553172647953
+    },
+    {
+      "kept_feature": "Fwd URG Flags",
+      "dropped_feature": "CWE Flag Count",
+      "correlation": 1.0,
+      "kept_mi": 0.00039622465379918204,
+      "dropped_mi": 0.0001662599784593155,
+      "kept_variance": 0.0028170899022370577,
+      "dropped_variance": 0.0028170899022370577
+    },
+    {
+      "kept_feature": "Fwd Header Len",
+      "dropped_feature": "Bwd Header Len",
+      "correlation": 0.9886380403557753,
+      "kept_mi": 0.07670683585684746,
+      "dropped_mi": 0.03342681447895557,
+      "kept_variance": 1255734.875,
+      "dropped_variance": 5678870.5
+    },
+    {
+      "kept_feature": "Fwd Header Len",
+      "dropped_feature": "Subflow Fwd Pkts",
+      "correlation": 0.9974804659829798,
+      "kept_mi": 0.07670683585684746,
+      "dropped_mi": 0.01532871275983827,
+      "kept_variance": 1255734.875,
+      "dropped_variance": 3147.782958984375
+    },
+    {
+      "kept_feature": "Fwd Header Len",
+      "dropped_feature": "Subflow Bwd Pkts",
+      "correlation": 0.9883012921477073,
+      "kept_mi": 0.07670683585684746,
+      "dropped_mi": 0.011588330817852821,
+      "kept_variance": 1255734.875,
+      "dropped_variance": 14184.3583984375
+    },
+    {
+      "kept_feature": "Fwd Header Len",
+      "dropped_feature": "Subflow Bwd Byts",
+      "correlation": 0.9925757077065527,
+      "kept_mi": 0.07670683585684746,
+      "dropped_mi": 0.034835088298307504,
+      "kept_variance": 1255734.875,
+      "dropped_variance": 28946905088.0
+    },
+    {
+      "kept_feature": "Pkt Len Std",
+      "dropped_feature": "Pkt Len Max",
+      "correlation": 0.9727325690665607,
+      "kept_mi": 0.03763903880313091,
+      "dropped_mi": 0.0371760367601619,
+      "kept_variance": 26061.60546875,
+      "dropped_variance": 259942.859375
+    },
+    {
+      "kept_feature": "Pkt Len Mean",
+      "dropped_feature": "Pkt Len Std",
+      "correlation": 0.9050752122243023,
+      "kept_mi": 0.0422903509725201,
+      "dropped_mi": 0.03763903880313091,
+      "kept_variance": 10115.7255859375,
+      "dropped_variance": 26061.60546875
+    },
+    {
+      "kept_feature": "Pkt Len Mean",
+      "dropped_feature": "Pkt Len Var",
+      "correlation": 0.9181664584520074,
+      "kept_mi": 0.0422903509725201,
+      "dropped_mi": 0.03883867680106423,
+      "kept_variance": 10115.7255859375,
+      "dropped_variance": 6690065408.0
+    },
+    {
+      "kept_feature": "Pkt Len Mean",
+      "dropped_feature": "Pkt Size Avg",
+      "correlation": 0.9915013928768174,
+      "kept_mi": 0.0422903509725201,
+      "dropped_mi": 0.04055799650661185,
+      "kept_variance": 10115.7255859375,
+      "dropped_variance": 11103.5283203125
+    },
+    {
+      "kept_feature": "Pkt Len Mean",
+      "dropped_feature": "Bwd Seg Size Avg",
+      "correlation": 0.9568716194072627,
+      "kept_mi": 0.0422903509725201,
+      "dropped_mi": 0.034010447207668104,
+      "kept_variance": 10115.7255859375,
+      "dropped_variance": 27737.537109375
+    },
+    {
+      "kept_feature": "RST Flag Cnt",
+      "dropped_feature": "ECE Flag Cnt",
+      "correlation": 1.0,
+      "kept_mi": 0.0022496736637092063,
+      "dropped_mi": 0.00031331555658731247,
+      "kept_variance": 0.15956845879554749,
+      "dropped_variance": 0.15956845879554749
+    },
+    {
+      "kept_feature": "Active Mean",
+      "dropped_feature": "Active Max",
+      "correlation": 0.9474360391297789,
+      "kept_mi": 0.006220052941964482,
+      "dropped_mi": 0.004311906837905166,
+      "kept_variance": 9280737509376.0,
+      "dropped_variance": 16621628293120.0
+    },
+    {
+      "kept_feature": "Active Mean",
+      "dropped_feature": "Active Min",
+      "correlation": 0.9053648881222687,
+      "kept_mi": 0.006220052941964482,
+      "dropped_mi": 0.0010789481103166132,
+      "kept_variance": 9280737509376.0,
+      "dropped_variance": 6497563049984.0
+    }
+  ],
+  "threshold": 1.6364134550094604,
+  "threshold_percentile": 95,
+  "time_steps": 10,
+  "hidden_dim": 64,
+  "k_features": 10
+}
