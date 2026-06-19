@@ -6,8 +6,8 @@ Dok ini menjelaskan workflow proyek dari sisi arsitektur, alur runtime, file, da
 
 ```text
 Network interface
-  -> argus
-  -> ra CSV stream
+  -> CICFlowMeter
+  -> completed-flow CSV
   -> traffic-source/extract_feature.py
   -> feature_schema.py ordering
   -> lstm-ae/model.py LSTMAEService
@@ -18,7 +18,7 @@ Network interface
 Komponen utama:
 
 - `main.py`: orkestrator live pipeline.
-- `traffic-source/extract_feature.py`: parser output Argus/ra dan pembuat 19 fitur runtime.
+- `traffic-source/extract_feature.py`: parser output CICFlowMeter CSV dan pembuat 19 fitur runtime.
 - `feature_schema.py`: daftar variant model, mapping nama fitur model ke key internal, ordering fitur.
 - `lstm-ae/model.py`: arsitektur dual-stage LSTM autoencoder dan service runtime.
 - `database.py`: schema DB, insert flow, query dashboard, query training/update model.
@@ -29,21 +29,21 @@ Komponen utama:
 ## Runtime Workflow
 
 1. User menjalankan `main.py`.
-2. `main.py` baca env seperti `MODEL_VARIANT`, `DB_*`, `CAPTURE_INTERFACE`, `ENABLE_UPDATE_MODEL`, dan `ENABLE_LEARNING_MODE`.
+2. `main.py` baca env seperti `MODEL_VARIANT`, `DB_*`, `CAPTURE_INTERFACE`, `CICFLOWMETER_CMD`, `ENABLE_UPDATE_MODEL`, dan `ENABLE_LEARNING_MODE`.
 3. `database.init_db()` membuat tabel `flows` dan `alerts`, lalu menambah 19 kolom fitur jika belum ada.
 4. `LSTMAEService` load artifact dari `lstm-ae/dual-stage-ae/artifacts/<variant>/`.
 5. Dashboard Flask start di thread terpisah.
 6. Capture start di interface, default `eth0`, bisa `wlan0` lewat `CAPTURE_INTERFACE=wlan0`.
-7. `argus` menangkap flow, `ra` mengubah output menjadi CSV.
-8. Setiap baris CSV diproses oleh `process_csv_line()`.
-9. `extract_features_from_row()` membuat metadata flow dan dict fitur 19 kolom.
-10. `get_feature_vector()` mengurutkan fitur sesuai `selected_features` artifact aktif.
-11. `LSTMAEService.add_to_buffer()` membentuk sliding window sepanjang `seq_len`.
-12. Jika buffer sudah penuh, `LSTMAEService.predict()` menghitung error dual-stage dan anomaly score.
-13. `LSTMAEService.is_anomaly()` membandingkan error dengan threshold.
-14. Jika learning mode aktif, anomaly dipaksa `False`.
-15. `database.insert_flow()` simpan flow. Jika anomaly, row alert juga dibuat.
-16. Dashboard API membaca data DB untuk traffic chart, alert list, detail alert, dan kontribusi fitur.
+7. `start_cicflowmeter_capture()` menjalankan `.venv/bin/cicflowmeter` atau override dari `CICFLOWMETER_CMD`.
+8. CICFlowMeter menulis CSV completed-flow ke `CICFLOWMETER_OUTPUT_FILE`.
+9. `read_new_cicflowmeter_rows()` membaca row baru dari CSV.
+10. `extract_features_from_row()` map kolom CICFlowMeter ke 19 fitur runtime.
+11. Setiap row completed-flow masuk `get_feature_vector()`, scoring LSTM-AE, dan `database.insert_flow()`.
+12. `LSTMAEService.add_to_buffer()` membentuk sliding window sepanjang `seq_len`.
+13. Jika buffer sudah penuh, `LSTMAEService.predict()` menghitung error dual-stage dan anomaly score.
+14. `LSTMAEService.is_anomaly()` membandingkan error dengan threshold.
+15. Jika learning mode aktif, anomaly dipaksa `False`.
+16. Dashboard API membaca completed flow DB untuk traffic chart, alert list, detail alert, dan kontribusi fitur.
 
 ## Model Workflow
 
@@ -93,7 +93,7 @@ Jika `ENABLE_UPDATE_MODEL=1`:
 
 Tabel utama:
 
-- `flows`: semua flow, metadata jaringan, 19 fitur runtime, score, status anomaly.
+- `flows`: completed flow level, metadata jaringan, 19 fitur runtime, score, status anomaly.
 - `alerts`: subset flow yang anomaly, dipakai dashboard alert.
 
 Versi fitur:
@@ -130,14 +130,14 @@ API:
 
 ### `main.py`
 
-Peran file: entrypoint live service. Menghubungkan DB, model, dashboard, Argus capture, feature extraction, inference, dan insert DB.
+Peran file: entrypoint live service. Menghubungkan DB, model, dashboard, CICFlowMeter capture, feature extraction, inference, dan insert DB.
 
-- `CaptureProcess.__init__(argus_proc, ra_proc)`: simpan handle proses `argus` dan `ra`, serta stdout dari `ra`.
-- `CaptureProcess.poll()`: cek apakah `argus` atau `ra` sudah exit.
-- `CaptureProcess.stop()`: terminate lalu kill fallback untuk `ra` dan `argus`, agar tidak ada orphan process.
-- `CaptureProcess.stderr_text()`: gabungkan stderr dari `argus` dan `ra` untuk logging error capture.
+- `CaptureProcess.__init__(proc)`: simpan handle proses CICFlowMeter.
+- `CaptureProcess.poll()`: cek apakah proses CICFlowMeter sudah exit.
+- `CaptureProcess.stop()`: terminate lalu kill fallback agar tidak ada orphan process.
+- `CaptureProcess.stderr_text()`: baca stderr CICFlowMeter untuk logging error capture.
 - `signal_handler(sig, frame)`: set flag `running=False` saat SIGINT/SIGTERM.
-- `start_argus_capture(interface="eth0")`: validasi interface, cek binary/capability, start `argus` dan `ra` sebagai proses terpisah.
+- `start_cicflowmeter_capture(interface="eth0", output_file=...)`: validasi interface, start `.venv/bin/cicflowmeter` atau command override `CICFLOWMETER_CMD`.
 - `run_pipeline()`: alur utama live capture sampai insert DB dan alert.
 - `start_dashboard()`: start Flask dashboard di `0.0.0.0:5000`.
 
@@ -153,29 +153,18 @@ Peran file: kontrak fitur model. Semua variant pakai nama fitur model, lalu dipe
 
 ### `traffic-source/extract_feature.py`
 
-Peran file: parse CSV Argus/ra, maintain state flow, dan hitung 19 fitur runtime.
+Peran file: parse CSV CICFlowMeter, map header ke 19 fitur runtime, dan output metadata flow completed.
 
-- `safe_float(val, default=0.0)`: parse float aman dari field Argus kosong, `-`, atau invalid.
-- `safe_int(val, default=0)`: parse int aman dari field Argus kosong, `-`, atau invalid.
-- `parse_protocol(proto_str)`: normalisasi protocol seperti `tcp`, `udp`, `icmp`, atau angka protocol.
-- `BulkAccumulator`: dataclass state untuk bulk transfer approximation.
-- `FlowState`: dataclass state per flow, menyimpan counter paket/byte/window/subflow/bulk.
-- `FlowTracker.__init__()`: inisialisasi map flow dan threshold heuristic bulk/subflow.
-- `FlowTracker.get_flow_key(row)`: buat key unik flow dari src/dst IP, port, dan protocol.
-- `FlowTracker._new_state(...)`: buat state awal untuk flow baru.
-- `FlowTracker._normalize_tcp_window(window_value)`: clamp TCP window ke range 0 sampai 65535.
-- `FlowTracker._looks_like_new_flow(...)`: deteksi apakah update Argus sebenarnya flow baru/reset counter.
-- `FlowTracker._flush_bulk_candidate(accumulator)`: finalize kandidat bulk jika memenuhi threshold.
-- `FlowTracker._update_bulk(...)`: update kandidat bulk dari delta packet/byte.
-- `FlowTracker.update(...)`: update state flow dari row Argus terbaru.
-- `FlowTracker._bulk_snapshot(...)`: hitung snapshot fitur bulk rata-rata dari accumulator.
-- `FlowTracker.get_subflow_fwd_byts(state, fallback_sbytes)`: hitung rata-rata byte forward per subflow.
-- `FlowTracker.get_forward_bulk_metrics(state, spkts, sbytes, duration)`: ambil metrik bulk forward.
-- `FlowTracker.get_backward_bulk_metrics(state, dpkts, dbytes, duration)`: ambil metrik bulk backward.
-- `FlowTracker.cleanup_old(max_age=300.0)`: hapus state flow lama agar memory tidak tumbuh terus.
-- `extract_features_from_row(row, flow_tracker)`: fungsi inti ekstraksi. Menghasilkan `{features, metadata}`.
-- `process_csv_stream(input_stream, callback=None)`: proses stream CSV banyak baris dari `ra`.
-- `process_csv_line(line, flow_tracker)`: proses satu baris CSV untuk live pipeline.
+- `safe_float(val, default=0.0)`: parse float aman dari field CICFlowMeter kosong, invalid, `NaN`, atau `Infinity`.
+- `safe_int(val, default=0)`: parse int aman dari field CICFlowMeter kosong atau invalid.
+- `normalize_column(name)`: normalisasi nama kolom agar beda spasi/slash/underscore tetap bisa dimatch.
+- `normalized_row(row)`: buat dict row dengan key kolom ternormalisasi.
+- `first_value(row, aliases, default="")`: ambil nilai pertama dari daftar alias header.
+- `parse_timestamp(value)`: ubah timestamp CICFlowMeter numeric/string menjadi epoch seconds.
+- `parse_protocol(value)`: normalisasi protocol angka/string menjadi `TCP`, `UDP`, `ICMP`, atau uppercase.
+- `extract_features_from_row(row)`: map satu row CICFlowMeter menjadi `{features, metadata}`.
+- `read_new_cicflowmeter_rows(path, offset=0, header=None)`: tail CSV CICFlowMeter dan return row baru tanpa duplikasi.
+- `process_csv_stream(input_stream, callback=None)`: proses file/stream CSV CICFlowMeter.
 - `get_feature_vector(features_dict, selected_features=None)`: output vector fitur sesuai urutan model aktif.
 
 ### `lstm-ae/model.py`
@@ -294,17 +283,6 @@ Peran file: smoke test ringan untuk API dashboard tanpa DB live.
 
 - `main()`: monkeypatch fungsi DB yang diperlukan, lalu cek route POST penting dan validasi payload.
 
-### `traffic-source/argus_source.sh`
-
-Peran file: helper shell lama untuk menjalankan pipeline `argus | ra` manual. Runtime utama saat ini memakai `main.py`, bukan script ini.
-
-Isi workflow:
-
-- Baca `CAPTURE_INTERFACE`, default `eth0`.
-- Set daftar field Argus/ra yang sama dengan extractor.
-- Jalankan `sudo argus ... | ra ...`.
-- Trap SIGINT/SIGTERM untuk stop pipeline.
-
 ### `dashboard/templates/traffic.html`
 
 Peran file: UI dashboard traffic. Memanggil API traffic, recent flows, top talkers, protocol distribution, dan top ports.
@@ -347,6 +325,9 @@ Artifact/model lama. Runtime baru memakai `dual-stage-ae/artifacts/<variant>`.
 - `MODEL_VARIANT`: `mrmr`, `mutual_information`, `rf_importance`, atau `rfe`. Default `mrmr`.
 - `MODEL_DEVICE`: device PyTorch, default `cpu`.
 - `CAPTURE_INTERFACE`: interface capture, contoh `wlan0`.
+- `CICFLOWMETER_CMD`: optional override command CICFlowMeter. Placeholder tersedia: `{interface}`, `{output_file}`.
+- `CICFLOWMETER_OUTPUT_FILE`: file CSV output CICFlowMeter, default `/tmp/anomaly-nids-cicflowmeter/flows.csv`.
+- `CICFLOWMETER_POLL_SECONDS`: interval polling CSV, default `1`.
 - `ENABLE_UPDATE_MODEL`: `1` untuk worker retrain, `0` untuk off.
 - `UPDATE_MODEL_INTERVAL_SECONDS`: interval worker.
 - `UPDATE_MODEL_MIN_NORMAL_FLOWS`: minimum normal flow sebelum retrain.
@@ -400,7 +381,8 @@ One-shot update model:
 ## Catatan Perubahan Penting
 
 - Runtime sudah dual-stage LSTM-AE.
+- Capture runtime memakai CICFlowMeter external command, bukan Argus/ra.
 - Runtime menyimpan 19 fitur union, tetapi model hanya membaca `selected_features` aktif.
 - `feature_set_version` row baru adalah `dual_stage_v1`.
-- Capture di `main.py` menjalankan `argus` dan `ra` sebagai child process terpisah agar shutdown bersih.
+- Capture di `main.py` menjalankan CICFlowMeter sebagai child process agar shutdown bersih.
 - Dashboard API menerima body POST kosong untuk route yang punya default, dan validasi payload sebelum menyentuh state/DB.

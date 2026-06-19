@@ -1,8 +1,8 @@
 import logging
 import os
 import re
+import shlex
 import signal
-import shutil
 import subprocess
 import sys
 import threading
@@ -17,7 +17,12 @@ from update_model.update_model import update_model_worker
 
 TRAFFIC_SRC_DIR = os.path.join(os.path.dirname(__file__), "traffic-source")
 sys.path.insert(0, TRAFFIC_SRC_DIR)
-from extract_feature import ARGUS_FIELDS, FlowTracker, get_feature_vector, process_csv_line
+from extract_feature import (
+    PYTHON_CICFLOWMETER_FIELDS,
+    extract_features_from_row,
+    get_feature_vector,
+    read_new_cicflowmeter_rows,
+)
 
 LSTM_AE_DIR = os.path.join(os.path.dirname(__file__), "lstm-ae")
 sys.path.insert(0, LSTM_AE_DIR)
@@ -64,37 +69,26 @@ running = True
 
 
 class CaptureProcess:
-    def __init__(self, argus_proc, ra_proc):
-        self.argus_proc = argus_proc
-        self.ra_proc = ra_proc
-        self.stdout = ra_proc.stdout
+    def __init__(self, proc):
+        self.proc = proc
 
     def poll(self):
-        for proc in (self.argus_proc, self.ra_proc):
-            code = proc.poll()
-            if code is not None:
-                return code
-        return None
+        return self.proc.poll()
 
     def stop(self):
-        for proc in (self.ra_proc, self.argus_proc):
-            if proc.poll() is None:
-                proc.terminate()
-        for proc in (self.ra_proc, self.argus_proc):
+        if self.proc.poll() is None:
+            self.proc.terminate()
             try:
-                proc.wait(timeout=5)
+                self.proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=5)
+                self.proc.kill()
+                self.proc.wait(timeout=5)
 
     def stderr_text(self):
-        parts = []
-        for name, proc in (("argus", self.argus_proc), ("ra", self.ra_proc)):
-            if proc.stderr:
-                text = proc.stderr.read()
-                if text:
-                    parts.append(f"{name}: {text.strip()}")
-        return "\n".join(parts)
+        if not self.proc.stderr:
+            return ""
+        text = self.proc.stderr.read()
+        return text.strip() if text else ""
 
 
 def signal_handler(sig, frame):
@@ -107,59 +101,48 @@ signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
 
-def start_argus_capture(interface="eth0"):
+def start_cicflowmeter_capture(interface="eth0", output_file="/tmp/anomaly-nids-cicflowmeter/flows.csv"):
     if not SAFE_INTERFACE_RE.fullmatch(interface):
         raise RuntimeError(f"Invalid CAPTURE_INTERFACE={interface!r}")
 
-    binary_paths = {binary: shutil.which(binary) for binary in ("argus", "ra")}
-    missing_bins = [binary for binary, path in binary_paths.items() if path is None]
-    if missing_bins:
-        raise RuntimeError(f"Missing required capture binaries: {', '.join(missing_bins)}")
+    cmd_template = os.getenv("CICFLOWMETER_CMD", "").strip()
+    if cmd_template:
+        cmd = shlex.split(cmd_template.format(interface=interface, output_file=output_file))
+    else:
+        cicflowmeter_runner = os.path.join(TRAFFIC_SRC_DIR, "run_cicflowmeter.py")
+        if os.path.exists(cicflowmeter_runner):
+            cmd = [
+                sys.executable,
+                cicflowmeter_runner,
+                "-i",
+                interface,
+                "-o",
+                output_file,
+                "--fields",
+                ",".join(PYTHON_CICFLOWMETER_FIELDS),
+            ]
+        else:
+            cmd = []
+    if not cmd:
+        raise RuntimeError(
+            "CICFlowMeter CLI not found. Install it in .venv with "
+            "'.venv/bin/python -m pip install cicflowmeter' or set CICFLOWMETER_CMD."
+        )
 
-    argus_path = binary_paths["argus"]
-    if os.geteuid() != 0:
-        getcap_path = shutil.which("getcap")
-        cap_output = ""
-        if getcap_path:
-            try:
-                result = subprocess.run(
-                    [getcap_path, argus_path],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                )
-                cap_output = (result.stdout or "").strip()
-            except Exception:
-                cap_output = ""
+    output_dir = os.path.dirname(output_file)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+    if os.path.exists(output_file):
+        os.remove(output_file)
 
-        has_capture_caps = "cap_net_raw" in cap_output or "cap_net_admin" in cap_output
-        if not has_capture_caps:
-            raise RuntimeError(
-                "Argus capture privileges are missing. Run the pipeline with sudo or grant "
-                f"capture capabilities to {argus_path} (cap_net_raw, cap_net_admin)."
-            )
-
-    argus_proc = subprocess.Popen(
-        [argus_path, "-X", "-A", "-S", "1", "-P", "0", "-i", interface, "-w", "-"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    if argus_proc.stdout is None:
-        argus_proc.kill()
-        raise RuntimeError("Argus stdout pipe unavailable")
-
-    fields = ",".join(ARGUS_FIELDS)
-    ra_proc = subprocess.Popen(
-        [binary_paths["ra"], "-M", "noman", "-n", "-c", ",", "-s", fields, "-u"],
-        stdin=argus_proc.stdout,
-        stdout=subprocess.PIPE,
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         text=True,
-        bufsize=1,
     )
-    argus_proc.stdout.close()
-    logger.info("Argus capture started on %s", interface)
-    return CaptureProcess(argus_proc, ra_proc)
+    logger.info("CICFlowMeter capture started on %s, output=%s", interface, output_file)
+    return CaptureProcess(proc)
 
 
 def run_pipeline():
@@ -202,30 +185,23 @@ def run_pipeline():
         logger.info("Update-model worker is disabled")
 
     interface = os.getenv("CAPTURE_INTERFACE", "eth0")
-    proc = start_argus_capture(interface)
-    flow_tracker = FlowTracker()
+    output_file = os.getenv("CICFLOWMETER_OUTPUT_FILE", "/tmp/anomaly-nids-cicflowmeter/flows.csv")
+    poll_seconds = float(os.getenv("CICFLOWMETER_POLL_SECONDS", "1"))
+    proc = start_cicflowmeter_capture(interface, output_file)
     flow_count = 0
+    csv_offset = 0
+    csv_header = None
 
     time.sleep(2)
     if proc.poll() is not None:
         proc.stop()
         err = proc.stderr_text()
-        logger.error("Argus exited immediately. stderr: %s", err)
+        logger.error("CICFlowMeter exited immediately. stderr: %s", err)
         return
 
     try:
-        for line in proc.stdout:
-            if not running:
-                break
-
-            line = line.strip()
-            if not line:
-                continue
-
-            result = process_csv_line(line, flow_tracker)
-            if not result:
-                continue
-
+        def store_flow(result):
+            nonlocal flow_count
             features = result["features"]
             metadata = result["metadata"]
             feature_vector = get_feature_vector(features, lstm_service.selected_features)
@@ -249,15 +225,27 @@ def run_pipeline():
             flow_count += 1
 
             if flow_count % 50 == 0:
-                logger.info("Processed %s flows", flow_count)
+                logger.info("Stored %s CICFlowMeter flows", flow_count)
+
+        while running:
+            rows, csv_offset, csv_header = read_new_cicflowmeter_rows(output_file, csv_offset, csv_header)
+            for row in rows:
+                result = extract_features_from_row(row)
+                if result:
+                    store_flow(result)
+
+            if proc.poll() is not None:
+                break
+
+            time.sleep(poll_seconds)
     except Exception as e:
         logger.error("Pipeline error: %s", e)
     finally:
         proc.stop()
         if flow_count == 0:
             err = proc.stderr_text()
-            logger.error("No flows captured. Argus stderr: %s", err)
-        logger.info("Stopped. Total: %s flows", flow_count)
+            logger.error("No flows captured. CICFlowMeter stderr: %s", err)
+        logger.info("Stopped. Total CICFlowMeter flows: %s", flow_count)
 
 
 def start_dashboard():

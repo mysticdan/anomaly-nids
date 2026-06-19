@@ -3,17 +3,17 @@
 ## 1. Introduction
 This project is an end-to-end Python pipeline for real-time network traffic anomaly detection.
 
-The live runtime now uses a **dual-stage LSTM Autoencoder** stored under `lstm-ae/dual-stage-ae/artifacts/<variant>`. Network flow summaries are captured with `argus`, converted into the shared 19-feature runtime contract, scored in real time, stored in PostgreSQL, and displayed through a Flask dashboard.
+The live runtime now uses a **dual-stage LSTM Autoencoder** stored under `lstm-ae/dual-stage-ae/artifacts/<variant>`. CICFlowMeter emits completed flow rows, which are converted into the shared 19-feature runtime contract, scored, stored in PostgreSQL, and displayed through a Flask dashboard.
 
 ## 2. System Architecture
 The system is composed of four layers:
-- **Data Acquisition**: captures flow summaries using `argus` and `ra`
+- **Data Acquisition**: captures completed flow summaries using CICFlowMeter
 - **Feature Engineering**: converts flow summaries into the shared dual-stage feature union
 - **Anomaly Detection**: uses a dual-stage LSTM Autoencoder with a persisted scaler and threshold
 - **Visualization & Storage**: stores scored flows in PostgreSQL and serves them via Flask
 
 ### High-Level Data Flow
-`Network Interface` -> `Argus/ra` -> `traffic-source/extract_feature.py` -> `LSTMAEService` -> `database.py` -> `Flask Dashboard`
+`Network Interface` -> `CICFlowMeter CSV` -> `traffic-source/extract_feature.py` -> `LSTMAEService` -> `database.py` -> `Flask Dashboard`
 
 ## 3. Live Model Contract
 
@@ -44,18 +44,16 @@ The system is composed of four layers:
 ## 4. Module Breakdown
 
 ### `traffic-source/` (Feature Extraction)
-Responsible for parsing Argus CSV output and producing the model feature vector.
+Responsible for parsing CICFlowMeter CSV output and producing the model feature vector.
 
 - `extract_feature.py`
-  - reads Argus fields including `sappbytes` and `swin`
+  - reads CICFlowMeter completed-flow CSV rows
   - computes the shared 19-feature union used by all supported variants
-  - uses a `FlowTracker` to maintain state for:
-    - bulk feature approximations
-    - subflow forward byte approximations
+  - maps CSE-CICIDS2018/CICFlowMeter header variants into internal feature keys
   - adds `feature_set_version = "dual_stage_v1"` to each flow
 
 Important note:
-Argus flow summaries do not expose CICFlowMeter bulk/subflow semantics directly, so some live features are **stateful approximations** derived from repeated flow updates.
+CICFlowMeter already computes the bulk, subflow, and IAT fields used during training, so runtime no longer keeps an Argus-side flow aggregator.
 
 ### `lstm-ae/` (Model Runtime)
 - `model.py`
@@ -91,8 +89,8 @@ Coordinates the full runtime:
 - initializes the database
 - loads the dual-stage LSTM-AE service for active `MODEL_VARIANT`
 - enables startup learning mode by default
-- starts live Argus capture
-- writes scored flows and alerts
+- starts live CICFlowMeter capture
+- writes scored completed flows and alerts
 - starts the dashboard thread
 
 ### `update_model/` (Incremental Model Updates)
@@ -117,14 +115,13 @@ DB_PASS="..." .venv/bin/python update_model/update_model.py
 
 ## 5. Technical Notes
 
-### Argus Capture Fields
-The live pipeline currently starts `argus` with:
-- `-X` to ignore host-level Argus config that could interfere with runtime capture
-- `-A` so application-byte fields are populated
-- `-S 1` so active flows emit status updates every second for near-real-time scoring
+### CICFlowMeter Capture
 
-The `ra` side uses `-M noman` so management records are filtered out before parsing, then requests these fields:
-- `stime, ltime, saddr, daddr, sport, dport, proto, dur, sbytes, dbytes, spkts, dpkts, flgs, state, sttl, dttl, smeansz, dmeansz, sminsz, dminsz, smaxsz, dmaxsz, sintpkt, dintpkt, sjit, djit, sload, dload, sloss, dloss, sappbytes, dappbytes, swin, dwin`
+The live pipeline starts `.venv/bin/cicflowmeter` by default. `CICFLOWMETER_CMD` can override that command. The command must write CICFlowMeter-compatible CSV to `CICFLOWMETER_OUTPUT_FILE`.
+
+Supported placeholders:
+- `{interface}`: value from `CAPTURE_INTERFACE`
+- `{output_file}`: CSV path watched by the runtime
 
 ### Database Compatibility
 Older rows may still exist in `flows` and `alerts`.
@@ -135,24 +132,24 @@ Older rows may still exist in `flows` and `alerts`.
 ## 6. Setup and Execution
 
 ### Prerequisites
-- install `argus` and `ra`
+- install Python CICFlowMeter in `.venv`
 - run PostgreSQL
 - install Python dependencies from `requirements.txt`
 
 ### Run the System
 ```bash
-sudo CAPTURE_INTERFACE="eth0" python main.py
+CAPTURE_INTERFACE="eth0" .venv/bin/python main.py
 ```
 
-If you do not run as root, the runtime now checks whether `/usr/sbin/argus` has capture capabilities (`cap_net_raw`, `cap_net_admin`) and exits early with a clear error if they are missing.
-
-`CAPTURE_INTERFACE` is validated before capture starts, and `argus`/`ra` are managed as separate child processes so shutdown does not leave capture processes behind.
+`CAPTURE_INTERFACE` is validated before capture starts. CICFlowMeter is managed as a child process so shutdown does not leave capture processes behind.
 
 The dashboard is served at `http://localhost:5000`.
 
 ### Runtime Defaults
 - `update_model` is enabled unless `ENABLE_UPDATE_MODEL=0`
 - `MODEL_VARIANT` defaults to `mrmr`
+- `CICFLOWMETER_OUTPUT_FILE` defaults to `/tmp/anomaly-nids-cicflowmeter/flows.csv`
+- `CICFLOWMETER_POLL_SECONDS` defaults to `1`
 - startup learning mode is enabled unless `ENABLE_LEARNING_MODE=0`
 - startup learning mode duration defaults to `10` minutes and can be changed with `LEARNING_MODE_DURATION_MINUTES`
 
